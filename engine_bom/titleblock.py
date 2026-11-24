@@ -67,11 +67,14 @@ def parse_titleblock_response(raw_text: str) -> Dict[str, Any]:
 
 
 def extract_titleblock(provider: VisionProvider, images: List, total_pages: int = 1,
-                       source_page_numbers=None) -> Dict[str, Any]:
+                       source_page_numbers=None, template=None) -> Dict[str, Any]:
     """对图纸（通常取末页/单页）提取标题栏。返回 {fields, missing_required, raw}。"""
     from .agent_loop import AgentLoop
     mapping = source_page_numbers if source_page_numbers is not None else ([total_pages] if len(images) == 1 else None)
     prompt = build_titleblock_prompt()
+    if template:
+        from .titleblock_template import alias_prompt
+        prompt += alias_prompt(template)
     if mapping:
         prompt += '\n输入图片对应原始页码：' + json.dumps(mapping) + '。标题栏另返回source_page，必须使用原始页码，放大图不是新页。'
     if provider.name == 'mock':

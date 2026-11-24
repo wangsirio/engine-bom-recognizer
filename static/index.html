@@ -52,6 +52,12 @@
       <div class="card">
         <h2>标题栏信息</h2>
         <div id="bom-titleblock" class="kv-grid"></div>
+        <details id="bom-enterprise-title" class="hidden">
+          <summary>查看企业版标题栏 JSON</summary>
+          <p id="bom-enterprise-title-summary" class="hint"></p>
+          <pre id="bom-enterprise-title-json" class="title-template-preview"></pre>
+          <a id="bom-enterprise-title-download">下载企业 BOM JSON（含标题栏）</a>
+        </details>
       </div>
       <div class="card" id="bom-list-panel">
         <h2>零部件清单</h2><p class="hint">浅色单元格可直接编辑。修改后先保存，再导出；正式批准在“复核与历史”中完成。</p>
@@ -212,6 +218,26 @@
       <label for="enterprise-file">选择企业配置文件（JSON）</label><input id="enterprise-file" type="file" accept=".json"><button id="enterprise-save">导入企业配置</button><span id="enterprise-message" role="status"></span>
       <p><button id="enterprise-json">导出当前BOM企业JSON</button><button id="enterprise-csv">导出企业CSV</button><button id="enterprise-xlsx">导出企业Excel</button></p>
     </div>
+    <div class="card" id="title-template-panel">
+      <h2>标题栏 JSON 模板 <span class="badge" id="title-template-state">加载中</span></h2>
+      <p>企业决定输出哪些键。多个同义来源可映射到同一个键，系统按选择顺序取第一个有效值，不拼接；全空时输出 <code>null</code>。</p>
+      <div class="row title-template-tools">
+        <label>选择模板文件（JSON） <input id="title-template-file" type="file" accept=".json,application/json"></label>
+        <button type="button" id="title-template-import">导入并保存</button>
+        <button type="button" id="title-template-example">载入示例</button>
+        <a href="/static/titleblock-template.example.json" download>下载示例文件</a>
+      </div>
+      <details><summary>查看系统现有字段</summary><ul id="title-template-sources" class="title-template-catalog"></ul></details>
+      <label>模板名称 <input id="title-template-name" maxlength="80" placeholder="例如：甲方工程图标题栏"></label>
+      <div id="title-template-rows" class="title-template-rows"></div>
+      <div class="row">
+        <button type="button" id="title-template-add">＋ 添加输出键</button>
+        <button type="button" id="title-template-save" class="primary">保存模板</button>
+        <button type="button" id="title-template-disable" disabled>停用模板</button>
+      </div>
+      <p id="title-template-message" class="hint" role="status"></p>
+      <details><summary>预览输出结构（空值示意）</summary><pre id="title-template-preview" class="title-template-preview"></pre></details>
+    </div>
     <div class="card" id="association-panel"><h2>企业关联索引 <span class="badge">影响分析使用</span></h2>
       <p>告诉系统哪些文档、零件、工序和检验项目彼此关联，变更时才能找到受影响的对象。</p><p class="config-example">材料规范变更 → 关联 BOM → 加工工序 → 检验项目</p>
       <details><summary>配置文件需要哪些内容？</summary><p>导入 JSON 对象清单，填写唯一 ID、对象类型、匹配关键词和依赖关系。depends_on 表示该对象依赖的上游对象。缺少索引时，系统会提示无法判定影响。</p></details>
@@ -260,6 +286,7 @@
 <dialog id="deth-dialog" aria-labelledby="deth-dialog-title"><div class="section-heading"><h2 id="deth-dialog-title">检测详情</h2><button id="deth-dialog-max" aria-label="放大详情">放大</button><button id="deth-dialog-close" aria-label="关闭详情">关闭</button></div><div id="deth-detail"></div></dialog>
 <script src="/static/app.js?v=20261012-2"></script>
 <script src="/static/extensions.js?v=20261012-2"></script>
+<script src="/static/titleblock_template.js?v=1"></script>
 <script src="/static/workspace.js?v=20261011-1"></script>
 </body>
 </html>

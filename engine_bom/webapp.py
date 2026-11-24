@@ -121,6 +121,21 @@ def save_web_settings(patch: dict) -> None:
 # 任务管理
 # ---------------------------------------------------------------------------
 
+def _titleblock_template_path():
+    # Enterprise templates also work with --config, without loading web model settings.
+    return os.path.join(DATA_DIR, 'titleblock_template.json')
+
+
+def load_titleblock_template():
+    from .titleblock_template import validate_template
+    try:
+        with open(_titleblock_template_path(), encoding='utf-8') as handle:
+            template = json.load(handle)
+    except FileNotFoundError:
+        return None
+    return None if template is None else validate_template(template)
+
+
 def _create_job(kind: str) -> str:
     _cleanup_jobs()
     job_id = time.strftime("%Y%m%d%H%M%S") + "-" + secrets.token_hex(3)
@@ -393,6 +408,7 @@ def _job_bom(job_dir: str, file_path: str, options: dict) -> dict:
     from .titleblock import extract_dims_and_balloons, extract_titleblock
 
     cfg = load_web_config()
+    title_template = load_titleblock_template()
     if options.get("provider"):
         cfg.setdefault("provider", {})["name"] = options["provider"]
     if options.get("preprocess"):
@@ -417,7 +433,14 @@ def _job_bom(job_dir: str, file_path: str, options: dict) -> dict:
     layout = locate_regions(pipeline.provider, images, (cfg.get('enterprise') or {}).get('drawing_template'))
     title_images = titleblock_images(images, layout['regions'])
     tb = extract_titleblock(pipeline.provider, title_images, total_pages=len(images),
-                           source_page_numbers=titleblock_page_numbers(images, layout['regions']))
+                           source_page_numbers=titleblock_page_numbers(images, layout['regions']),
+                           **({'template': title_template} if title_template else {}))
+    enterprise_title = {}
+    if title_template:
+        from .titleblock_template import apply_template
+        values, summary = apply_template(tb['fields'], title_template)
+        enterprise_title = {'enterprise_title_block': values, 'title_block_template': summary}
+        tb['fields'].pop('enterprise_fields', None)
     dims = extract_dims_and_balloons(pipeline.provider, images)
     from .hybrid_inspection import inspect
     from .engineering_checks import inspection_config
@@ -437,7 +460,7 @@ def _job_bom(job_dir: str, file_path: str, options: dict) -> dict:
             "missing_required": tb["missing_required"],
             "dimensions": dims.get("dimensions"), "balloons": dims.get("balloons"),
             "issues": issues, "outputs": result.outputs,
-            "model_info": bom.get("model_info"), "inspection": inspection, "layout": layout}
+            "model_info": bom.get("model_info"), "inspection": inspection, "layout": layout, **enterprise_title}
 
 
 def _job_doc(job_dir: str, file_path: str, options: dict) -> dict:
@@ -657,6 +680,9 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             return self._serve_static(path[len("/static/"):])
         try:
+            if path == '/api/enterprise/titleblock-template':
+                from .titleblock_template import SOURCE_LABELS
+                return self._json({'template': load_titleblock_template(), 'sources': SOURCE_LABELS})
             if path.startswith('/api/reviews/'):
                 if not self._authorized():
                     return self._json({"error": "请求令牌无效，请刷新页面后重试"}, 403)
@@ -719,6 +745,14 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return self._json({"error": "请求令牌无效，请刷新页面后重试"}, 403)
         try:
+            if path == '/api/enterprise/titleblock-template':
+                from .titleblock_template import validate_template
+                body = self._read_json_body()
+                if not isinstance(body, dict) or set(body) != {'template'}:
+                    raise ValueError('请求必须包含 template（模板对象或 null）')
+                template = None if body['template'] is None else validate_template(body['template'])
+                _atomic_json(_titleblock_template_path(), template)
+                return self._json({'template': template})
             if path == '/api/enterprise/profile':
                 from .enterprise import validate_profile
                 profile = validate_profile(self._read_json_body())
@@ -1068,7 +1102,10 @@ class Handler(BaseHTTPRequestHandler):
             if fmt == 'xlsx':
                 body = _xlsx_bytes([list(row.values()) for row in display_rows], list(mapped['field_mapping'].values()))
                 return self._send(200, body, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'enterprise_bom.xlsx')
-            return self._json(mapped)
+            if 'enterprise_title_block' in result:
+                mapped['title_block'] = result['enterprise_title_block']
+            body = json.dumps(mapped, ensure_ascii=False, allow_nan=False, indent=2).encode('utf-8')
+            return self._send(200, body, 'application/json; charset=utf-8', 'enterprise_bom.json')
         bom_doc = _bom_document_from(result.get("bom") or {})
         doc_id = str(result.get("document_id") or job_id)
         if fmt == "csv":

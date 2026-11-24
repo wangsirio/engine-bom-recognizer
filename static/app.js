@@ -133,6 +133,21 @@ function renderBomResult(res) {
   hideProgress("bom");
   $("#bom-result").classList.remove("hidden");
   renderKV("#bom-titleblock", res.title_block || {});
+  const enterpriseTitle = $('#bom-enterprise-title');
+  if (enterpriseTitle) {
+    const template = res.title_block_template;
+    enterpriseTitle.classList.toggle('hidden', !template);
+    enterpriseTitle.open = Boolean(template);
+    if (template) {
+      $('#bom-enterprise-title-json').textContent = JSON.stringify(res.enterprise_title_block, null, 2);
+      $('#bom-enterprise-title-summary').textContent = [
+        '模板：' + template.name,
+        template.missing_keys.length && '缺失或未读出：' + template.missing_keys.join('、'),
+        template.conflicts.length && '来源值不同，已按优先级取值，请复核：' + template.conflicts.join('、'),
+      ].filter(Boolean).join('；');
+      $('#bom-enterprise-title-download').href = '/api/export/bom/' + encodeURIComponent(bomJobId) + '?profile=enterprise&fmt=json';
+    }
+  }
   $('#bom-result .badge').textContent = res.model_info?.provider === 'mock' ? '离线演示数据 · 与上传内容无关，不可用于准确率验收' : '识别结果 · 待人工复核';
   const warnings = res.title_block?.extraction_warnings || [];
   if (warnings.length) $('#bom-titleblock').insertAdjacentHTML('beforeend', '<p class="alert error">标题栏证据校验未通过：' + esc(warnings.join('；')) + '</p>');

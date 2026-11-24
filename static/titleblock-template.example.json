@@ -1,0 +1,9 @@
+{
+  "name": "工程图标题栏示例",
+  "fields": [
+    {"key": "drawing_title", "sources": ["drawing_name"], "aliases": ["零件名称"]},
+    {"key": "drawing_code", "sources": ["drawing_no"], "aliases": ["图样代号", "Drawing No."]},
+    {"key": "checked_by", "sources": ["checker"], "aliases": ["审图人"]},
+    {"key": "net_weight", "sources": ["weight"]}
+  ]
+}
