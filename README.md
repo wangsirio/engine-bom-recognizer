@@ -22,6 +22,8 @@ python -X utf8 -m engine_bom.webapp
 打开 http://127.0.0.1:8787/ ，上传刚生成的 `data/raw/demo_engine_bom.pdf`。
 默认 Mock 模型返回固定演示结果，不代表真实图纸识别效果。启用真实识别时，在网页“系统设置”配置 OpenAI 兼容视觉模型，并按需要启用装配识别与工程检查。
 
+Web 上传时可选择「合并为一份 BOM」或「每页单独生成 BOM」；合并保留原行、原数量与来源页。企业字段和标题栏在同一个 [BOM 输出模板](docs/TITLEBLOCK_TEMPLATE.md) 中配置。交付范围和待办详见 [BOM 开发汇报](docs/BOM_FEATURE_PROGRESS.md)。
+
 本公开版本不包含个人 API 密钥、原始上传图纸、运行结果、审核账号/令牌、数据库或外部数据集镜像。需要的演示输入可以通过上述脚本重新生成；四个装配单元测试标签是人工构造测试数据。
 
 离线测试：`python -X utf8 -m unittest discover -s tests -q`。浏览器回归脚本需要另装 Playwright 及浏览器。
@@ -50,11 +52,11 @@ GitHub 仓库用于分享源码；运行 Python 后端后才能使用网页功�
 | 需求 | 子功能 | 状态 |
 |---|---|---|
 | REQ-01 | 多格式图纸接入与预处理（PDF/图片 + 去噪/倾斜校正/二值化） | ✅ 已实现（DWG/DXF 需内网转换，见下文） |
-| REQ-01 | 标题栏信息提取 | ✅ 已实现（VLM + 字段必填校验） |
-| REQ-01 | 明细栏/零部件信息提取（含跨页合并） | ✅ 已实现 |
-| REQ-01 | 装配层级关系识别（多级 BOM 树） | ⏳ 预留（P1，需求表建议初期一级装配+人工确认） |
+| REQ-01 | 标题栏信息提取 | ✅ 已实现（VLM、字段校验及可配置企业模板） |
+| REQ-01 | 明细栏/零部件信息提取（含跨页合并） | ✅ 支持完整明细行的逐页识别、跨页汇总或独立导出；不自动拼接跨页半行 |
+| REQ-01 | 装配层级关系识别（多级 BOM 树） | ◐ 支持合并结果的装配候选树；需启用真实模型和装配识别，逐页独立树未做 |
 | REQ-01 | BOM 结构化生成与导出（Excel/CSV/JSON） | ✅ 已实现 |
-| REQ-01 | 图纸与 BOM 一致性校验 | ✅ 已实现（件号重复/数量/编码规则校验 + 检查报告） |
+| REQ-01 | 图纸与 BOM 一致性校验 | ◐ 支持基础异常提示及装配数量对账；原图数量独立复读、企业物料编码规则未做 |
 | REQ-02 | 多格式文件解析（docx/pdf/txt/图片 + 版面还原） | ✅ 已实现（docx 标准库解析，扫描页走 VLM） |
 | REQ-02 | 技术参数 / 材料工艺 / 检验标准提取 | ✅ 已实现（四类要素统一 JSON） |
 | REQ-02 | 结构化输出与系统对接（REST API） | ✅ 已实现（REST API + JSON/Excel 导出） |
@@ -193,13 +195,13 @@ python -X utf8 -m engine_bom.cli experiment configs/experiment_demo.yaml
 
 | 方法 | 路径 | 说明 |
 |---|---|---|
-| POST | `/api/jobs/bom` | 上传图纸 → BOM 识别 + 标题栏 + 规则检查（异步） |
+| POST | `/api/jobs/bom` | 上传图纸（异步）；multipart `options.output_mode` 支持 `merged` 或 `per_page` |
 | POST | `/api/jobs/doc` | 上传文档 → 关键要素提取（异步） |
 | POST | `/api/jobs/compare` | 上传两版文件 → 变更对比（异步） |
 | POST | `/api/jobs/inspect` | 上传图纸 → 规则检查（异步） |
 | GET | `/api/jobs/<id>` | 任务状态与结果（前端每 1.5s 轮询） |
 | POST | `/api/bom/save`、`/api/doc/save` | 人工复核结果保存 + 修正记录 |
-| GET | `/api/export/bom/<id>?fmt=json\|csv\|xlsx` | BOM 下载 |
+| GET | `/api/export/bom/<id>?fmt=json\|csv\|xlsx` | BOM 下载；逐页模式需指定 `page`（原始页码） |
 | GET | `/api/export/doc/<id>?fmt=json\|xlsx` | 要素提取下载 |
 | GET | `/api/compare/<id>/ecn.md` | 变更单（ECN）草稿 |
 | GET | `/api/history`、`/api/reviewlog` | 变更历史 / 人工修正记录 |
@@ -210,7 +212,10 @@ python -X utf8 -m engine_bom.cli experiment configs/experiment_demo.yaml
 | 配置 | 说明 |
 |---|---|
 | `provider.name` | `mock` / `openai_compat` |
-| `recognition.mode` | `per_page`（逐页合并，稳）/ `whole_doc`（整档一次，省调用） |
+| `recognition.mode` | 命令行或未指定 Web 输出模式时：`per_page`（逐页读取）/ `whole_doc`（整档读取）；Web 的两种新输出模式均逐页读取 |
+| `recognition.prompt_version` | 提示词版本，当前 `v5`（含区域裁切图约束） |
+| `recognition.detail_crops` | 长边 >1200px 的页附加明细表/标题栏裁切图（默认 `true`） |
+| `recognition.region_crops` | 裁切优先按版面定位坐标；`false` 关闭区域定位、退回四象限切分 |
 | `recognition.duplicate_quantity_policy` | 跨页重复数量策略：`keep_max`（默认）/ `sum` / `keep_first` |
 | `ingestion.preprocess` | 扫描件预处理开关：倾斜校正 / 去噪 / 二值化 / 对比度 |
 | `knowledge.enabled` | 企业规则检索注入提示词（RAG 简化版） |
@@ -232,7 +237,8 @@ python -X utf8 -m engine_bom.cli experiment configs/experiment_demo.yaml
 
 ## 待实现（按需求表优先级）
 
-- 装配层级关系识别（REQ-01-4，P1）：需从引出序号 + 视图反推父子关系，建议一级装配先行、人工确认
+- 多页装配层级（REQ-01-4，P1）：补齐逐页树和不同图号的有据挂接，候选关系仍须人工确认
+- 图纸与 BOM 一致性（REQ-01-6，P1）：补齐原图数量复读、逐行差异报告和企业物料编码规则
 - 变更影响范围分析（REQ-03-4，P2）：需企业文档关联关系/知识图谱支撑
 - ERR-02/03/04/05 等 VLM 推理类图纸检查：需 CV 符号识别 + 标注数据积累（第二阶段）
 - DWG/DXF 原生解析：内网安装 ODA File Converter 或 ezdxf 渲染后接入

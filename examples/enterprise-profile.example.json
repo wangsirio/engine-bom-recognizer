@@ -1,17 +1,31 @@
 {
   "version": "example-1",
   "export_fields": {
+    "item_no": "序号",
     "part_number": "物料编码",
     "name_zh": "物料名称",
+    "specification": "规格型号",
     "quantity": "数量",
-    "material": "材料牌号"
+    "unit": "计量单位",
+    "material": "材料牌号",
+    "remark": "备注",
+    "title_block.drawing_code": "所属图纸图号",
+    "detail.coating_code": "涂层代号",
+    "constant.factory": "工厂代码"
+  },
+  "detail_fields": {
+    "coating_code": ["涂层代号", "涂层编码"]
+  },
+  "constant_fields": {
+    "factory": "A01"
   },
   "required_annotations": [
     {
       "id": "EXAMPLE-01",
       "requirement": "图纸注明热处理要求",
       "source": "演示规则，必须替换为真实企业标准条款",
-      "applies_when": "仅适用于企业规定需要热处理的零件"
+      "applies_when": "仅适用于企业规定需要热处理的零件",
+      "match_terms": ["热处理", "淬火", "调质"]
     }
   ],
   "parameter_dictionary": [

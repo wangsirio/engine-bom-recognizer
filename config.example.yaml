@@ -15,8 +15,11 @@ assembly:
 inspection:
   enabled: false
 recognition:
-  prompt_version: v4
+  prompt_version: v5
   preserve_printed_rows: true
+  # 按版面定位坐标裁切标题栏/明细表区域后一并送模型；定位失败退回四象限裁切
+  detail_crops: true
+  region_crops: true
 knowledge:
   enabled: true
   path: data/knowledge/engine_rules.txt

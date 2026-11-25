@@ -46,32 +46,109 @@ view必须包含整个视图的完整轮廓、剖面线、中心线、该视图�
             'events': result.events}
 
 
+# Per-kind padding around a located region. The model box may sit exactly on the
+# label baseline or the table rule; a small margin keeps headers/units readable.
+REGION_PADDING = {
+    'title_block': (0.08, 0.04),
+    'bom_table': (0.06, 0.05),
+}
+CROP_KINDS = ('title_block', 'bom_table')
+
+
+# A crop smaller than this (normalized) is a locating error, not a detail view;
+# a crop covering nearly the whole page is not a detail either and is skipped.
+MIN_CROP_SIDE = 0.02
+MAX_CROP_AREA = 0.97
+
+
+def padded_bbox(region, padding=None):
+    """Outward-padded normalized bbox, clamped to the page."""
+    x0, y0, x1, y1 = region['bbox']
+    if padding is None:
+        padding = REGION_PADDING.get(region.get('kind'), (0.08, 0.04))
+    pad_x, pad_y = padding
+    return [max(0.0, x0-pad_x), max(0.0, y0-pad_y), min(1.0, x1+pad_x), min(1.0, y1+pad_y)]
+
+
+def usable_bbox(box):
+    """True only for a crop that adds detail without covering the whole page."""
+    return (isinstance(box, (list, tuple)) and len(box) == 4
+            and all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in box)
+            and 0.0 <= box[0] < box[2] <= 1.0 and 0.0 <= box[1] < box[3] <= 1.0
+            and box[2] - box[0] >= MIN_CROP_SIDE and box[3] - box[1] >= MIN_CROP_SIDE
+            and (box[2] - box[0]) * (box[3] - box[1]) <= MAX_CROP_AREA)
+
+
 def crop_region(images, region):
     image = images[region['source_page']-1]
-    x0, y0, x1, y1 = region['bbox']
+    box = region['bbox']
     import math
     # Outward rounding retains boundary pixels; normalized coordinates remain
     # independent of display size and PDF rasterization DPI.
-    return image.crop((math.floor(x0*image.width), math.floor(y0*image.height),
-                       max(math.floor(x0*image.width)+1, math.ceil(x1*image.width)),
-                       max(math.floor(y0*image.height)+1, math.ceil(y1*image.height))))
+    return image.crop((math.floor(box[0]*image.width), math.floor(box[1]*image.height),
+                       max(math.floor(box[0]*image.width)+1, math.ceil(box[2]*image.width)),
+                       max(math.floor(box[1]*image.height)+1, math.ceil(box[3]*image.height))))
 
 
-def titleblock_images(images, regions):
-    """Retain page context and a padded detail; model boxes may cut off labels."""
-    titles = [r for r in regions if r.get('kind') == 'title_block']
-    if not titles:
+def region_entries(images, regions, kinds=CROP_KINDS, page_numbers=None):
+    """Stable-order padded crops for every located region of the given kinds.
+
+    Returns [{'image', 'kind', 'source_page', 'bbox'}] where bbox is the padded
+    normalized box actually cropped, so the caller can map local coordinates back
+    to the original page. `images` is indexed by source_page-1.
+
+    Regions whose box is reversed, tiny, or covers nearly the whole page are
+    skipped: they carry no extra detail and would only cost another model call.
+    """
+    wanted = tuple(kinds)
+    allowed_pages = set(page_numbers) if page_numbers is not None else None
+    entries = []
+    for region in regions or []:
+        if not isinstance(region, dict) or region.get('kind') not in wanted:
+            continue
+        page = region.get('source_page')
+        if type(page) is not int or not 1 <= page <= len(images):
+            continue
+        if allowed_pages is not None and page not in allowed_pages:
+            continue
+        raw = region.get('bbox')
+        if not isinstance(raw, (list, tuple)) or len(raw) != 4:
+            continue
+        try:
+            box = padded_bbox(region)
+        except (TypeError, ValueError):
+            continue
+        if not usable_bbox(box):
+            continue
+        entry = dict(region, bbox=box)
+        entries.append({'image': crop_region(images, entry), 'kind': region['kind'],
+                        'source_page': page, 'bbox': box})
+    return entries
+
+
+def _kind_images(images, regions, kind):
+    """Page context + a padded detail for one region kind (legacy single-kind shape)."""
+    hits = [r for r in (regions or []) if isinstance(r, dict) and r.get('kind') == kind]
+    if not hits:
         return images[-1:]
     result, seen = [], set()
-    for region in titles:
+    for region in hits:
         page = region['source_page']
         if page not in seen:
             result.append(images[page-1])
             seen.add(page)
-        x0, y0, x1, y1 = region['bbox']
-        padded = dict(region, bbox=[max(0,x0-.08),max(0,y0-.04),min(1,x1+.08),min(1,y1+.04)])
-        result.append(crop_region(images, padded))
+        result.append(crop_region(images, dict(region, bbox=padded_bbox(region))))
     return result
+
+
+def titleblock_images(images, regions):
+    """Retain page context and a padded detail; model boxes may cut off labels."""
+    return _kind_images(images, regions, 'title_block')
+
+
+def bom_table_images(images, regions):
+    """Same contract as titleblock_images, for the parts-list table region."""
+    return _kind_images(images, regions, 'bom_table')
 
 
 def titleblock_page_numbers(images, regions):

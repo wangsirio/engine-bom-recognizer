@@ -58,14 +58,6 @@ $('#assembly-save').addEventListener('click', async () => {
     $('#assembly-message').textContent = '层级已保存并重新对账，JSON/Excel导出包含更新后的层级';
   } catch(error) { $('#assembly-message').textContent = error.message; }
 });
-$('#impact-index-save').addEventListener('click', async () => {
-  try {
-    const file = $('#impact-index-file').files[0];
-    if (!file) throw new Error('请选择关联索引JSON');
-    const result = await api('/api/impact/index', {method:'POST', headers:{'Content-Type':'application/json'}, body:await file.text()});
-    $('#impact-index-message').textContent = '已导入 ' + result.objects + ' 个对象，请重新执行版本对比';
-  } catch(error) { $('#impact-index-message').textContent = error.message; }
-});
 $('#doc-tables').addEventListener('change', event => {
   const select = event.target.closest('.doc-decision');
   if (select) docExtraction[select.dataset.section][Number(select.dataset.row)].review_status = select.value;
@@ -158,10 +150,11 @@ $('#enterprise-save').onclick = async () => {
     const file=$('#enterprise-file').files[0];
     if (!file) throw new Error('请选择企业配置JSON');
     await api('/api/enterprise/profile',{method:'POST',headers:{'Content-Type':'application/json'},body:await file.text()});
-    $('#enterprise-message').textContent='已保存，下一次任务生效';
-  } catch(e) { $('#enterprise-message').textContent=e.message; }
+    $('#enterprise-import-message').textContent='已保存，下一次任务生效';
+    document.dispatchEvent(new Event('enterprise-profile-imported'));
+  } catch(e) { $('#enterprise-import-message').textContent=e.message; }
 };
 ['json','csv','xlsx'].forEach(fmt => $('#enterprise-'+fmt).onclick = () => {
-  if (!bomJobId) { $('#enterprise-message').textContent='请先完成BOM识别'; return; }
-  window.open('/api/export/bom/'+bomJobId+'?profile=enterprise&fmt='+fmt,'_blank');
+  try { window.open(bomExportUrl(fmt, true), '_blank'); $('#enterprise-message').textContent = ''; }
+  catch (error) { $('#enterprise-message').textContent = error.message; }
 });

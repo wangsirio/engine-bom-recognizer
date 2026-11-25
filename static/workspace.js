@@ -69,7 +69,10 @@
       const busy = !progress.classList.contains('hidden');
       const ready = !result.classList.contains('hidden');
       document.querySelector('#' + prefix + '-start').disabled = busy;
-      if (view === 'bom') document.querySelector('#ins-correct').disabled = busy;
+      if (view === 'bom') {
+        document.querySelector('#ins-correct').disabled = busy;
+        document.querySelector('#bom-output-mode').disabled = busy;
+      }
       document.querySelectorAll('#view-' + view + ' .drop input').forEach(input => input.disabled = busy);
       document.querySelectorAll('#view-' + view + ' .drop').forEach(drop => drop.setAttribute('aria-disabled', String(busy)));
       empty.classList.toggle('hidden', busy || ready);

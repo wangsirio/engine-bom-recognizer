@@ -40,9 +40,12 @@ DEFAULT_CONFIG: Dict[str, Any] = {
     },
     "recognition": {
         "mode": "per_page",            # per_page（逐页识别后合并） | whole_doc（整档一次识别）
-        "prompt_version": "v4",
+        "prompt_version": "v5",
         "min_confidence": 0.0,
         "preserve_printed_rows": True,  # 审图必须保留原序号、重复行和异常数量
+        # 附加明细表/标题栏区域裁切图（按版面定位坐标裁切，定位失败才退回四象限）
+        "detail_crops": True,
+        "region_crops": True,
         # 跨页重复元器件的数量合并策略: keep_max（默认，防重复计数）| sum（拆表场景）| keep_first
         "duplicate_quantity_policy": "keep_max",
     },

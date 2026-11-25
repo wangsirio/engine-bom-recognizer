@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Tuple
 COMPONENT_FIELDS = [
     "item_no", "part_number", "name_zh", "name_en", "category",
     "specification", "material", "quantity", "weight", "unit", "position",
-    "supplier", "remark", "needs_review", "review_reasons", "source_page", "confidence",
+    "supplier", "remark", "needs_review", "review_reasons", "source_page", "confidence", "detail_values",
 ]
 
 TEXT_FIELDS = [
@@ -66,12 +66,14 @@ class BomComponent(object):
     review_reasons: List[str] = field(default_factory=list)  # 触发核实的具体原因
     source_page: Optional[int] = None
     confidence: Optional[float] = None
+    detail_values: Dict[str, str] = field(default_factory=dict)
+    _detail_reads: Dict[str, Any] = field(default_factory=dict, repr=False, compare=False)
 
     def display_name(self) -> str:
         return self.name_zh or self.name_en or self.part_number or "<未命名>"
 
     def to_dict(self) -> Dict[str, Any]:
-        return {k: getattr(self, k) for k in COMPONENT_FIELDS}
+        return {k: getattr(self, k) for k in COMPONENT_FIELDS if k != 'detail_values' or self.detail_values}
 
 
 @dataclass
@@ -175,10 +177,19 @@ def _coerce_str_list(value: Any) -> Tuple[List[str], Optional[str]]:
     return [str(value).strip()], None
 
 
+def valid_detail_values(value):
+    return isinstance(value, dict) and all(
+        isinstance(key, str) and key == key.strip() and 0 < len(key) <= 80 and
+        not any(ord(c) < 32 for c in key) and isinstance(text, str) and len(text) <= 1000
+        for key, text in value.items())
+
+
 def component_from_dict(raw: Dict[str, Any]) -> Tuple[BomComponent, List[str]]:
     """从模型输出的 dict 构建 BomComponent，做类型清洗，收集警告。"""
     warnings: List[str] = []
     comp = BomComponent()
+    if isinstance(raw.get('detail_reads'), dict):
+        comp._detail_reads = raw['detail_reads']
     known_alias = {
         "no": "item_no", "序号": "item_no", "item": "item_no",
         "pn": "part_number", "part_no": "part_number", "图号": "part_number", "件号": "part_number",
@@ -226,6 +237,9 @@ def component_from_dict(raw: Dict[str, Any]) -> Tuple[BomComponent, List[str]]:
             if warn:
                 warnings.append(warn)
             setattr(comp, name, lv)
+        elif name == 'detail_values':
+            if valid_detail_values(value):
+                comp.detail_values = dict(value)
         elif value is None:
             setattr(comp, name, "")
         else:
@@ -438,11 +452,12 @@ def validate_components(components: List[BomComponent], strict: bool = False,
     return [msg for _, msg in findings]
 
 
-def _dedup_key(c: BomComponent) -> Tuple[str, str, str]:
+def _dedup_key(c: BomComponent) -> tuple:
     return (
         normalize_part_number(c.part_number),
         normalize_text(c.name_zh) or normalize_text(c.name_en),
         normalize_text(c.specification),
+        tuple(sorted(c.detail_values.items())),
     )
 
 
@@ -456,8 +471,8 @@ def merge_components(pages_of_components: List[List[BomComponent]],
       keep_first 保留首次出现的数量
     """
     notes: List[str] = []
-    merged: Dict[Tuple[str, str, str], BomComponent] = {}
-    order: List[Tuple[str, str, str]] = []
+    merged: Dict[tuple, BomComponent] = {}
+    order: List[tuple] = []
     for page_comps in pages_of_components:
         for c in page_comps:
             key = _dedup_key(c)

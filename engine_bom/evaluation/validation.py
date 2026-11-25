@@ -46,12 +46,13 @@ def review_consensus(case, reviews):
 
 
 def valid_review_rows(record):
-    from ..schema import COMPONENT_FIELDS, TEXT_FIELDS
+    from ..schema import COMPONENT_FIELDS, TEXT_FIELDS, valid_detail_values
     rows=record.get("components")
     if not isinstance(rows,list):return False
     if not rows:return record.get("empty_confirmed") is True
     for c in rows:
         if not isinstance(c,dict) or any(k not in COMPONENT_FIELDS for k in c):return False
+        if 'detail_values' in c and not valid_detail_values(c['detail_values']):return False
         if not (c.get("part_number") or c.get("name_en") or c.get("name_zh")):return False
         if "quantity" not in c or "source_page" not in c:return False
         for key in ("item_no","quantity"):

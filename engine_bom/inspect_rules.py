@@ -116,7 +116,7 @@ def _is_standard_reference(part_number: str) -> bool:
         r"(?:(?:DIN|EN|ISO|IEC)|[/.-])*[A-Z]{0,3}[0-9]", compact))
 
 
-def check_bom_table(components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def check_bom_table(components: List[Dict[str, Any]], sequence_start: Optional[int] = 1) -> List[Dict[str, Any]]:
     """ERR-08 明细栏部分：序号连续性、图号重复、数量缺失。"""
     issues: List[Dict[str, Any]] = []
     nos: List[int] = []
@@ -144,8 +144,17 @@ def check_bom_table(components: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
             issues.append(make_issue("ERR-08", "明细栏第 %d 行数量非正数" % i,
                                      location="明细栏第 %d 行" % i))
     if nos:
-        duplicates = sorted(no for no, count in Counter(nos).items() if count > 1)
-        missing = sorted(set(range(1, max(nos) + 1)) - set(nos)) if max(nos) > 0 else []
+        counts = Counter(nos)
+        duplicates = sorted(no for no, count in counts.items() if count > 1)
+        # A sheet can legitimately begin mid-sequence. Bound gap collection even
+        # if a misread sequence number is very large.
+        start = sequence_start if sequence_start is not None else min(nos)
+        missing = []
+        for number in sorted(n for n in counts if n >= start):
+            missing.extend(range(start, min(number, start + 20 - len(missing))))
+            if len(missing) == 20:
+                break
+            start = number + 1
         if duplicates:
             issues.append(make_issue("ERR-08", "明细栏序号重复: %s" % duplicates[:20],
                                      location="明细栏", suggestion="核对重复序号对应行"))

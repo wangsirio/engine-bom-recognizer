@@ -30,6 +30,12 @@ _REVIEW_FIELDS = ["part_number", "name_zh", "name_en", "category", "specificatio
                   "item_no", "confidence"]
 
 
+def _basename(path):
+    """跨平台取文件名：同时识别 '/' 与 '\\\\' 分隔符（历史记录可能在另一平台写入）。"""
+    text = str(path or "")
+    return text.replace("\\", "/").rsplit("/", 1)[-1]
+
+
 def _num(value):
     return value if isinstance(value, (int, float)) and not isinstance(value, bool) else None
 
@@ -45,7 +51,7 @@ def build_record(job_id, kind, source_file, result=None, error=None,
         "job_id": job_id,
         "kind": kind,
         "finished_at": finished_at or datetime.now().isoformat(timespec="seconds"),
-        "file_name": os.path.basename(source_file) if source_file else None,
+        "file_name": _basename(source_file) if source_file else None,
         "status": "failed" if error else "ok",
     }
     if error:
@@ -56,6 +62,14 @@ def build_record(job_id, kind, source_file, result=None, error=None,
 
     bom = result.get("bom") or {}
     components = bom.get("components") or []
+    if result.get('output_mode'):
+        record['output_mode'] = result['output_mode']
+        record['page_statuses'] = result['page_statuses']
+        if result.get('incomplete_pages'):
+            record['status'] = 'incomplete'
+    if result.get('output_mode') == 'per_page':
+        # History totals describe rows read, not an implicitly merged BOM.
+        components = [row for unit in result['page_results'] for row in unit['bom']['components']]
     model = dict(result.get("model_info") or {})
     if model_info:
         model = dict(model_info, **{k: v for k, v in model.items() if v is not None})
@@ -139,7 +153,7 @@ def build_record(job_id, kind, source_file, result=None, error=None,
     }
 
     # ── 审图发现 ──
-    issues = result.get("issues") or []
+    issues = result.get("issues") or [issue for unit in result.get('page_results', []) for issue in unit['issues']]
     by_severity = Counter(str(i.get("severity") or "未分级") for i in issues)
     by_err = Counter(str(i.get("err_id") or "?") for i in issues)
     by_source = Counter(str(i.get("source") or i.get("origin") or "未标注") for i in issues)
@@ -156,7 +170,7 @@ def build_record(job_id, kind, source_file, result=None, error=None,
 
     # ── 耗时与输出 ──
     record["timings"] = {
-        "bom_process_time_s": _round_or_none(_num(bom.get("process_time_s")), 1),
+        "bom_process_time_s": _round_or_none(_num(bom.get("process_time_s", result.get('process_time_s'))), 1),
         "inspection_process_time_s": _round_or_none(_num(inspection.get("process_time_s")), 1),
     }
     record["outputs"] = [os.path.basename(p) for p in (result.get("outputs") or [])
@@ -243,6 +257,7 @@ def summarize(records):
         "total": len(records),
         "ok": len(ok),
         "failed": len(failed),
+        "incomplete": sum(r.get('status') == 'incomplete' for r in records),
         "success_rate": _round_or_none(len(ok) / len(records), 3) if records else None,
         "avg_bom_time_s": avg(bom_times),
         "avg_inspection_time_s": avg(insp_times),

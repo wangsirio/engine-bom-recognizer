@@ -5,11 +5,14 @@ from pathlib import Path
 
 def snapshot(result):
     components=(result.get('bom') or {}).get('components') or []
+    if result.get('output_mode') == 'per_page':
+        components = [row for unit in result['page_results'] for row in unit['bom']['components']]
     # Stable printed identity; row order and generated node IDs are not identity.
     def identity(index):
         if type(index) is not int or not 0<=index<len(components):return None
         c=components[index]
-        return (str(c.get('item_no') or ''),str(c.get('part_number') or ''),str(c.get('name_zh') or c.get('name_en') or ''))
+        return (str(c.get('source_page') or '') if result.get('output_mode') else '',
+                str(c.get('item_no') or ''),str(c.get('part_number') or ''),str(c.get('name_zh') or c.get('name_en') or ''))
     bom=sorted((identity(i),str(c.get('quantity')),str(c.get('material') or '')) for i,c in enumerate(components))
     tree=(result.get('bom') or {}).get('assembly') or {}
     indexed={n.get('id'):n for n in tree.get('nodes',[]) if isinstance(n,dict) and isinstance(n.get('id'),str)}
@@ -28,6 +31,7 @@ def compare_runs(result,history_dir,exclude_job=None,limit=5):
     digest=result.get('source_sha256')
     report={'status':'no_reference','references':[],'warning':'历史预测不是标准答案；重复运行一致也不能证明正确。'}
     if not isinstance(digest,str) or len(digest)!=64:return report
+    if result.get('incomplete_pages'):return report
     paths=sorted(Path(history_dir).glob('*.json'),key=lambda p:p.name,reverse=True)
     current=snapshot(result)
     for path in paths:
@@ -36,6 +40,7 @@ def compare_runs(result,history_dir,exclude_job=None,limit=5):
             previous=json.loads(path.read_text(encoding='utf-8'))
             old=previous.get('result')
             if not isinstance(old,dict) or old.get('source_sha256')!=digest:continue
+            if old.get('output_mode') != result.get('output_mode') or old.get('incomplete_pages'):continue
             before=snapshot(old)
         except (OSError,ValueError,TypeError,AttributeError):continue
         fields=[field for field in current if current[field]!=before[field]]

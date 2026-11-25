@@ -37,17 +37,39 @@
       <div class="drop" id="bom-drop"><span class="upload-glyph" aria-hidden="true">↥</span><strong class="drop-title">点击选择文件，或拖放到这里</strong><span class="drop-hint">PDF、PNG、JPG、DXF 等格式 · DXF 需要本地渲染组件</span><span class="file-meta"></span><input type="file" id="bom-file" aria-label="上传工程图纸" accept=".dxf,.pdf,.png,.jpg,.jpeg,.bmp,.tif,.tiff,.webp" hidden></div>
       <div class="row options">
         <label>模型 <select id="bom-provider"><option value="">默认配置</option><option value="mock">离线演示(Mock)</option><option value="openai_compat">视觉模型 API</option></select></label>
+        <label>多页文件输出方式 <select id="bom-output-mode"><option value="merged">合并为一份 BOM</option><option value="per_page">每页单独生成 BOM</option></select></label>
         <label class="chk"><input type="checkbox" id="bom-pre-deskew" checked> 倾斜校正</label>
         <label class="chk"><input type="checkbox" id="bom-pre-denoise"> 去噪</label>
         <label class="chk"><input type="checkbox" id="bom-pre-binarize"> 二值化</label>
         <button id="bom-start" class="primary">生成 BOM 并检查图纸</button>
       </div>
+      <p class="hint">合并只汇总各页明细，不去重、不改原数量；每页独立可分别查看和导出。</p>
     </div>
     <div id="bom-progress" class="progress hidden"><div class="bar"></div><span>识别中，请稍候（高密度图纸约 1~5 分钟）…</span></div>
     <div id="bom-error" class="alert error hidden"></div>
     <div id="bom-empty" class="capability-grid"><article><span class="feature-icon">▤</span><h2>结构化零部件清单</h2><p>提取件号、名称、材料与数量，核对后导出 Excel、CSV 或 JSON。</p></article><article><span class="feature-icon">⌕</span><h2>有依据的图纸检查</h2><p>结合规则与视觉模型给出问题候选，回到原图确认每一项。</p></article><article><span class="feature-icon">⑂</span><h2>装配关系与修订</h2><p>确认父子件关系，框选文字生成修订副本，保留原始图纸。</p></article></div>
 
     <div id="bom-result" class="hidden">
+      <div id="bom-page-status-panel" class="card hidden">
+        <div class="section-heading"><h2>分页识别状态</h2><span id="bom-page-mode" class="badge"></span></div>
+        <p id="bom-page-summary" role="status"></p>
+        <div class="table-wrap"><table id="bom-page-status-table"></table></div>
+        <details id="bom-page-titles" class="hidden"><summary>查看各页标题栏</summary><div id="bom-page-titles-list"></div></details>
+      </div>
+      <div id="bom-per-page-view" class="card hidden">
+        <h2>各页独立 BOM</h2><p class="hint">各页明细独立校验、单独下载。本版仅支持当前页的查看与导出，不在此模式进行整份审图、装配推理或编辑保存。</p>
+        <div class="row">
+          <label>原始页码 <select id="bom-result-page"></select></label>
+          <a id="bom-page-original" target="_blank" rel="noopener">查看本页原图</a>
+          <label>下载格式 <select id="bom-page-format"><option value="json">JSON</option><option value="csv">CSV</option><option value="xlsx">Excel</option></select></label>
+          <button id="bom-page-export">导出本页</button><button id="bom-page-enterprise-export">导出本页企业版</button>
+        </div>
+        <p id="bom-page-current-status" role="status"></p>
+        <h3>本页标题栏</h3><div id="bom-page-titleblock" class="kv-grid"></div>
+        <h3>本页明细</h3><div class="table-wrap"><table id="bom-page-components"></table></div>
+        <h3>本页校验</h3><p id="bom-page-validation" class="hint"></p><div id="bom-page-issues"></div>
+      </div>
+      <div id="bom-merged-view">
       <div class="result-toolbar"><span class="badge">识别结果 · 待人工复核</span><nav aria-label="结果快速定位"><a href="#bom-list-panel">零部件清单</a><a href="#bom-check-panel">图纸检查</a><a href="#bom-assembly-panel">装配层级</a><a href="#bom-correct-panel">图纸修订</a></nav></div>
       <div class="card">
         <h2>标题栏信息</h2>
@@ -110,6 +132,7 @@
         <button id="ins-correct" class="primary">生成文字修订副本</button>
         <a id="ins-correct-download" class="hidden" target="_blank">打开修订图纸</a>
       </div>
+      </div>
     </div>
   </section>
 
@@ -159,7 +182,7 @@
     </div>
     <div id="cmp-progress" class="progress hidden"><div class="bar"></div><span>对齐与识别中…</span></div>
     <div id="cmp-error" class="alert error hidden"></div>
-    <div id="compare-empty" class="guide-strip"><strong>准备关联数据，让影响分析更完整</strong><p>版本对比可以直接使用。分析受影响的 BOM、工序和检验项，需要先在系统设置导入企业关联索引。</p><button data-go="settings" class="quiet">查看关联索引设置</button></div>
+    <div id="compare-empty" class="guide-strip"><strong>先选同一文件的两个版本</strong><p>对比后可按新增、删除和修改筛选，并核对变更前后的原文。</p></div>
     <div id="cmp-result" class="hidden">
       <div class="card">
         <h2>变更概览</h2>
@@ -199,7 +222,7 @@
     <div class="card">
       <div class="row options" style="margin-top:0">
         <label>文件名筛选 <input id="deth-file" type="search" placeholder="文件名关键字"></label>
-        <label>状态 <select id="deth-status"><option value="">全部</option><option value="ok">成功</option><option value="failed">失败</option></select></label>
+        <label>状态 <select id="deth-status"><option value="">全部</option><option value="ok">成功</option><option value="incomplete">分页未完成</option><option value="failed">失败</option></select></label>
         <button id="deth-refresh" class="primary">刷新</button>
       </div>
       <div id="deth-summary" class="chips" style="margin-top:12px"></div>
@@ -212,36 +235,59 @@
 
   <!-- ═══════════ 设置 ═══════════ -->
   <section id="view-settings" class="view">
-    <h1>配置工作环境</h1><p class="hint">先连接视觉模型，再按需要配置企业导出格式、图纸要求和变更关联。</p>
-    <div class="card" id="enterprise-panel"><h2>企业字段与标注要求 <span class="badge">按需配置</span></h2><p>让导出的 BOM 使用企业列名，并告诉模型需要关注哪些参数和标注要求。</p><p class="config-example">例如：将“件号”导出为“物料编码”；对指定零件检查热处理标注。</p>
-      <details><summary>配置文件需要哪些内容？</summary><p>使用 JSON 文件，包含 export_fields（字段映射）、parameter_dictionary（参数词典）和 required_annotations（标注规则）。规则须注明适用条件和依据。项目 examples 目录提供示例。</p></details>
-      <label for="enterprise-file">选择企业配置文件（JSON）</label><input id="enterprise-file" type="file" accept=".json"><button id="enterprise-save">导入企业配置</button><span id="enterprise-message" role="status"></span>
-      <p><button id="enterprise-json">导出当前BOM企业JSON</button><button id="enterprise-csv">导出企业CSV</button><button id="enterprise-xlsx">导出企业Excel</button></p>
-    </div>
-    <div class="card" id="title-template-panel">
-      <h2>标题栏 JSON 模板 <span class="badge" id="title-template-state">加载中</span></h2>
-      <p>企业决定输出哪些键。多个同义来源可映射到同一个键，系统按选择顺序取第一个有效值，不拼接；全空时输出 <code>null</code>。</p>
+    <h1>配置工作环境</h1><p class="hint">先连接视觉模型，再按需要配置企业 BOM 导出格式和图纸审查要求。</p>
+    <div class="card" id="enterprise-panel">
+      <div class="section-heading"><h2>企业 BOM 输出模板</h2><span class="badge" id="output-template-state">加载中</span></div>
+      <p>告诉系统<strong>要输出什么、从哪里取值</strong>。图纸标题栏每张图一份，零件明细每个零件一行；标题栏的值可以引用到零件行里。</p>
       <div class="row title-template-tools">
-        <label>选择模板文件（JSON） <input id="title-template-file" type="file" accept=".json,application/json"></label>
-        <button type="button" id="title-template-import">导入并保存</button>
-        <button type="button" id="title-template-example">载入示例</button>
-        <a href="/static/titleblock-template.example.json" download>下载示例文件</a>
+        <label for="output-template-name">模板名称</label><input id="output-template-name" maxlength="80">
+        <button type="button" id="output-template-save" class="primary" disabled>保存模板</button>
       </div>
-      <details><summary>查看系统现有字段</summary><ul id="title-template-sources" class="title-template-catalog"></ul></details>
-      <label>模板名称 <input id="title-template-name" maxlength="80" placeholder="例如：甲方工程图标题栏"></label>
-      <div id="title-template-rows" class="title-template-rows"></div>
-      <div class="row">
-        <button type="button" id="title-template-add">＋ 添加输出键</button>
-        <button type="button" id="title-template-save" class="primary">保存模板</button>
-        <button type="button" id="title-template-disable" disabled>停用模板</button>
+      <p id="output-template-name-error" class="output-template-error hidden"></p>
+      <div class="row output-template-tabs" role="group" aria-label="输出字段范围">
+        <button type="button" id="output-template-bom-tab" aria-pressed="true">零件明细</button>
+        <button type="button" id="output-template-title-tab" aria-pressed="false">图纸标题栏</button>
       </div>
-      <p id="title-template-message" class="hint" role="status"></p>
-      <details><summary>预览输出结构（空值示意）</summary><pre id="title-template-preview" class="title-template-preview"></pre></details>
+      <p class="hint" id="output-template-scope-hint"></p>
+      <div id="output-template-title-presets" class="row hidden">
+        <button type="button" id="output-template-preset-common" disabled>＋ 加入常用标题栏字段</button>
+        <button type="button" id="output-template-preset-signoff" disabled>＋ 加入设计／校核／批准</button>
+        <span class="hint">只补缺少的字段，不覆盖现有设置。</span>
+      </div>
+      <div id="output-template-rows"></div>
+      <p id="output-template-scope-error" class="output-template-error hidden"></p>
+      <button type="button" id="output-template-add" disabled>＋ 添加字段</button>
+      <p id="output-template-validation-summary" class="alert error hidden" role="alert"></p>
+      <p id="output-template-message" class="hint" role="status"></p>
+      <details><summary>预览企业 JSON 结构</summary>
+        <p class="hint">仅展示结构，不运行识别。没有读到的字段输出 null，表格里留空。</p>
+        <pre id="output-template-preview" class="title-template-preview"></pre>
+      </details>
+      <details><summary>导入、下载模板或载入示例</summary>
+        <p class="hint">下载始终包含图纸标题栏和零件明细（包括未保存的修改），与当前页签无关。导入或载入示例先进入编辑区，点「保存模板」后才生效。也可导入旧版标题栏模板或企业配置的字段部分。</p>
+        <p class="hint">完整示例以系统默认字段为基础，另演示如何加自定义字段、引用标题栏和填写固定值。它不是你现有设置的备份；要备份请下载当前模板。</p>
+        <div class="row title-template-tools">
+          <label for="output-template-file">选择 JSON 文件</label><input id="output-template-file" type="file" accept=".json,application/json">
+          <button type="button" id="output-template-import" disabled>导入到编辑区</button>
+          <button type="button" id="output-template-example" disabled>载入示例</button>
+          <button type="button" id="output-template-download" disabled>下载当前模板（标题栏＋明细栏）</button>
+          <button type="button" id="output-template-reload" disabled>重新读取已保存版本</button>
+          <a href="/static/bom-output-template.example.json" download>下载完整示例（标题栏＋明细栏）</a>
+        </div>
+      </details>
+      <hr>
+      <div class="row" aria-label="导出已识别的 BOM">
+        <span class="hint">导出已识别的企业 BOM：</span><button id="enterprise-json">JSON</button><button id="enterprise-csv">CSV</button><button id="enterprise-xlsx">Excel</button>
+        <span id="enterprise-message" role="status"></span>
+      </div>
     </div>
-    <div class="card" id="association-panel"><h2>企业关联索引 <span class="badge">影响分析使用</span></h2>
-      <p>告诉系统哪些文档、零件、工序和检验项目彼此关联，变更时才能找到受影响的对象。</p><p class="config-example">材料规范变更 → 关联 BOM → 加工工序 → 检验项目</p>
-      <details><summary>配置文件需要哪些内容？</summary><p>导入 JSON 对象清单，填写唯一 ID、对象类型、匹配关键词和依赖关系。depends_on 表示该对象依赖的上游对象。缺少索引时，系统会提示无法判定影响。</p></details>
-      <label for="impact-index-file">选择关联索引文件（JSON）</label><input id="impact-index-file" type="file" accept=".json"><button id="impact-index-save">导入关联索引</button><span id="impact-index-message" role="status"></span>
+    <div class="card" id="enterprise-advanced-panel">
+      <details><summary>企业审图规则与参数词典（可选）</summary>
+        <p class="hint">这部分不影响字段模板的编辑。旧版企业配置仍可在这里完整导入；如果文件带有导出列配置，也会更新零件明细的导出列。</p>
+        <div class="row title-template-tools"><a href="/api/enterprise/profile/example" download>下载旧版企业配置示例</a>
+          <label for="enterprise-file">选择旧版 JSON</label><input id="enterprise-file" type="file" accept=".json,application/json">
+          <button id="enterprise-save">导入企业配置</button><span id="enterprise-import-message" role="status"></span></div>
+      </details>
     </div>
     <div class="card">
       <h2>视觉模型 API 接入</h2>
@@ -282,12 +328,12 @@
     </div>
   </section>
 </main>
-<dialog id="help-dialog" aria-labelledby="help-title"><div class="section-heading"><h2 id="help-title">开始使用工艺智能工作台</h2><button id="help-close" aria-label="关闭使用指南">关闭</button></div><p>第一次使用，先在系统设置连接支持图像输入的模型。</p><ol class="help-list"><li><b>生成 BOM 与检查图纸</b><p>上传二维图纸，核对清单和问题候选，保存后导出。</p></li><li><b>提取技术文档要素</b><p>上传文档，定位原文，逐项确认参数、材料、工艺和检验要求。</p></li><li><b>分析版本变化</b><p>上传前后两个版本；配置企业关联索引后，可继续追踪影响范围。</p></li><li><b>完成正式审核</b><p>编辑稿保存不等于批准。到“复核与历史”，使用独立身份完成编制、复核和批准。</p></li></ol><p class="hint">详细说明书位于项目 docs/USER_MANUAL.md。离线演示使用固定示例，不能验证真实图纸准确率。</p></dialog>
+<dialog id="help-dialog" aria-labelledby="help-title"><div class="section-heading"><h2 id="help-title">开始使用工艺智能工作台</h2><button id="help-close" aria-label="关闭使用指南">关闭</button></div><p>第一次使用，先在系统设置连接支持图像输入的模型。</p><ol class="help-list"><li><b>生成 BOM 与检查图纸</b><p>上传二维图纸，核对清单和问题候选，保存后导出。</p></li><li><b>提取技术文档要素</b><p>上传文档，定位原文，逐项确认参数、材料、工艺和检验要求。</p></li><li><b>分析版本变化</b><p>上传前后两个版本，核对新增、删除和修改的内容。</p></li><li><b>完成正式审核</b><p>编辑稿保存不等于批准。到“复核与历史”，使用独立身份完成编制、复核和批准。</p></li></ol><p class="hint">详细说明书位于项目 docs/USER_MANUAL.md。离线演示使用固定示例，不能验证真实图纸准确率。</p></dialog>
 <dialog id="deth-dialog" aria-labelledby="deth-dialog-title"><div class="section-heading"><h2 id="deth-dialog-title">检测详情</h2><button id="deth-dialog-max" aria-label="放大详情">放大</button><button id="deth-dialog-close" aria-label="关闭详情">关闭</button></div><div id="deth-detail"></div></dialog>
-<script src="/static/app.js?v=20261012-2"></script>
-<script src="/static/extensions.js?v=20261012-2"></script>
-<script src="/static/titleblock_template.js?v=1"></script>
-<script src="/static/workspace.js?v=20261011-1"></script>
+<script src="/static/app.js?v=20261125-1"></script>
+<script src="/static/extensions.js?v=20261125-3"></script>
+<script src="/static/bom_output_template.js?v=4"></script>
+<script src="/static/workspace.js?v=20261125-1"></script>
 </body>
 </html>
 

@@ -104,11 +104,29 @@ category 字段值只写分类名本身（如"轴系件""密封件"），不得�
 四位及以上的整数重量（如 1188、1441）必须逐位核对原图，不得丢位或插入小数点。
 '''
 
+
+def build_recognition_prompt_v5(**kwargs):
+    """v5: located title-block / parts-table crops arrive as extra images."""
+    text = build_recognition_prompt_v4(**kwargs)
+    return text + '''
+【区域裁切图 v5】
+除整页图外，可能还附加若干张裁切图，它们是同一页上"标题栏"或"明细表"区域的放大图，不是新页。
+1. 裁切图只作该区域的放大证据，source_page 一律填它所属的原页页码，禁止把裁切序号当页码。
+2. 明细表裁切图用于逐行核对序号、件号、名称、规格、材料、数量、重量；整页图用于判断该表属于哪页、
+   是否跨页、裁切是否漏掉行的两端。两者冲突且无法消解时，保留明细表裁切图读到的原文，并把冲突写进 remark。
+3. 同一零件在整页图与裁切图中都出现时只输出一行，不得因放大重复计数，也不得重新编号。
+4. 裁切图边缘可能截断表头或最后一行：疑似截断时回整页图确认；确认不了就把该行 quantity 填 null
+   并在 remark 写"裁切边缘待核实"，不要默认为 1，也不要臆造该行。
+5. 裁切图只有局部，不能据此判断"全图只有这些零件"。仍须通读整页图，补全裁切区域以外的明细行。
+6. 标题栏裁切图用于读图名/图号/材料/比例/重量等，不得用明细栏某些零件的材料替代标题栏材料。
+'''
+
 PROMPTS: Dict[str, Dict[str, object]] = {
     "v1": {"version": "v1", "builder": build_recognition_prompt},
     "v2": {"version": "v2", "builder": build_recognition_prompt_v2},
     "v3": {"version": "v3", "builder": build_recognition_prompt_v3},
     "v4": {"version": "v4", "builder": build_recognition_prompt_v4},
+    "v5": {"version": "v5", "builder": build_recognition_prompt_v5},
 }
 
 

@@ -42,6 +42,7 @@ import urllib.parse
 from email import policy
 from email.parser import BytesParser
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from itertools import chain
 
 from .config import DEFAULT_CONFIG, deep_merge, load_config
 from .export import write_csv, write_json, write_xlsx
@@ -60,6 +61,7 @@ REVIEWLOG_PATH = os.path.join(DATA_DIR, "review_log.json")
 _jobs: dict = {}
 _jobs_lock = threading.RLock()
 _log_lock = threading.Lock()
+_settings_lock = threading.Lock()
 _API_TOKEN = os.environ.get("ENGINE_BOM_API_TOKEN") or secrets.token_urlsafe(32)
 MAX_REQUEST_BYTES = int(os.environ.get("ENGINE_BOM_MAX_UPLOAD_MB", "100")) * 1024 * 1024
 JOB_TTL_SECONDS = int(os.environ.get("ENGINE_BOM_JOB_TTL_HOURS", "24")) * 3600
@@ -86,6 +88,19 @@ class _FormData(dict):
 # 配置
 # ---------------------------------------------------------------------------
 
+def _merge_web_settings(base, patch):
+    merged = deep_merge(base, patch)
+    if 'enterprise_title_template' in patch:
+        merged['enterprise_title_template'] = copy.deepcopy(patch['enterprise_title_template'])
+    enterprise = patch.get('enterprise')
+    if isinstance(enterprise, dict):
+        # These are complete per-profile maps, not additions to a previous column list.
+        for key in ('export_fields', 'detail_fields', 'constant_fields'):
+            if key in enterprise:
+                merged['enterprise'][key] = copy.deepcopy(enterprise[key])
+    return merged
+
+
 def load_web_config() -> dict:
     if CONFIG_PATH:
         # Explicit deployment profile is authoritative, not cloud web settings.
@@ -95,26 +110,20 @@ def load_web_config() -> dict:
     if os.path.exists(SETTINGS_PATH):
         try:
             with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
-                cfg = deep_merge(cfg, json.load(f))
+                cfg = _merge_web_settings(cfg, json.load(f))
         except (ValueError, OSError):
             pass
     return cfg
 
 
 def save_web_settings(patch: dict) -> None:
-    current = {}
-    if os.path.exists(SETTINGS_PATH):
+    with _settings_lock:
         try:
             with open(SETTINGS_PATH, "r", encoding="utf-8") as f:
                 current = json.load(f)
         except (ValueError, OSError):
-            pass
-    merged = deep_merge(current, patch)
-    parent = os.path.dirname(SETTINGS_PATH)
-    if parent and not os.path.isdir(parent):
-        os.makedirs(parent, exist_ok=True)
-    with open(SETTINGS_PATH, "w", encoding="utf-8", newline="\n") as f:
-        json.dump(merged, f, ensure_ascii=False, indent=2)
+            current = {}
+        _atomic_json(SETTINGS_PATH, _merge_web_settings(current, patch))
 
 
 # ---------------------------------------------------------------------------
@@ -126,8 +135,12 @@ def _titleblock_template_path():
     return os.path.join(DATA_DIR, 'titleblock_template.json')
 
 
-def load_titleblock_template():
+def load_titleblock_template(config=None):
     from .titleblock_template import validate_template
+    config = load_web_config() if config is None else config
+    if 'enterprise_title_template' in config:
+        template = config['enterprise_title_template']
+        return None if template is None else validate_template(template)
     try:
         with open(_titleblock_template_path(), encoding='utf-8') as handle:
             template = json.load(handle)
@@ -404,11 +417,12 @@ def balloon_bom_mismatch_note(balloons, components):
 
 
 def _job_bom(job_dir: str, file_path: str, options: dict) -> dict:
+    from .corrections import sha256
     from .pipeline import BomPipeline
-    from .titleblock import extract_dims_and_balloons, extract_titleblock
+    from .bom_pages import build_paged_output, duplicate_part_notes, has_title, read_title
 
     cfg = load_web_config()
-    title_template = load_titleblock_template()
+    title_template = load_titleblock_template(cfg)
     if options.get("provider"):
         cfg.setdefault("provider", {})["name"] = options["provider"]
     if options.get("preprocess"):
@@ -420,47 +434,71 @@ def _job_bom(job_dir: str, file_path: str, options: dict) -> dict:
     # 直接传下去会让 FileKnowledgeBase 在任务目录里找规则文件（静默 0 条）。
     _anchor_knowledge_path(cfg)
     pipeline = BomPipeline(cfg, base_dir=job_dir)
-    result = pipeline.process_file(file_path, retain_pages=True)
+    output_mode = options.get('output_mode')
+    result = pipeline.process_file(file_path, retain_pages=True, **({'paged_output': True} if output_mode else {}))
     if result.status != "ok":
         raise RuntimeError("; ".join(result.errors))
 
-    bom = result.bom.to_dict()
-    pages = result.pages
-    images = [getattr(p,'original_image',None) or p.image for p in pages]
-    import time as _time
-    _t_review = _time.time()
-    from .drawing_layout import locate_regions, titleblock_images, titleblock_page_numbers
-    layout = locate_regions(pipeline.provider, images, (cfg.get('enterprise') or {}).get('drawing_template'))
-    title_images = titleblock_images(images, layout['regions'])
-    tb = extract_titleblock(pipeline.provider, title_images, total_pages=len(images),
-                           source_page_numbers=titleblock_page_numbers(images, layout['regions']),
-                           **({'template': title_template} if title_template else {}))
-    enterprise_title = {}
-    if title_template:
-        from .titleblock_template import apply_template
-        values, summary = apply_template(tb['fields'], title_template)
-        enterprise_title = {'enterprise_title_block': values, 'title_block_template': summary}
-        tb['fields'].pop('enterprise_fields', None)
-    dims = extract_dims_and_balloons(pipeline.provider, images)
+    images = [getattr(p, 'original_image', None) or p.image for p in result.pages]
+    review_started = time.time()
+    from .drawing_layout import titleblock_images, titleblock_page_numbers
+    # 识别阶段已定位过一次版面区域；这里复用同一份结果，不重复消耗模型调用。
+    # 测试替身可能没有 layout()，此时回退为独立定位。
+    if hasattr(pipeline, 'layout'):
+        layout = pipeline.layout(images)
+    else:
+        from .drawing_layout import locate_regions
+        layout = locate_regions(pipeline.provider, images,
+                                (cfg.get('enterprise') or {}).get('drawing_template'))
+    if output_mode:
+        payload = build_paged_output(result, pipeline.provider, images, layout, output_mode, title_template)
+        payload.update(layout=layout, outputs=[])
+        if output_mode == 'per_page':
+            return payload
+        bom = payload['bom']
+        bom['validation_issues'].extend(duplicate_part_notes(bom['components']))
+        if payload['incomplete_pages'] or payload.get('title_block_notice'):
+            # Incomplete or mixed-drawing data is not a reliable input for cross-page
+            # assembly/dimension checks. The recognized rows are still available.
+            reason = ('部分页面识别未完成，未执行整份审图或装配推理。' if payload['incomplete_pages']
+                      else '各页图号不同，未执行跨页审图或装配推理。')
+            bom['validation_issues'].append(reason)
+            bom['assembly'] = {'nodes': [], 'inference_status': 'not_run', 'warning': reason}
+            payload.update(issues=[], dimensions=[], balloons=[], inspection={'visual_status': 'not_run', 'warning': reason})
+            return payload
+        from .assembly import infer_assembly, update_quantity_checks
+        bom['assembly'] = infer_assembly(pipeline.provider, images, bom['components'], cfg.get('assembly'))
+        bom['validation_issues'].extend('装配层级：' + warning for warning in bom['assembly'].get('warnings', []))
+        update_quantity_checks(bom)
+        title_for_checks = payload['title_block'] if has_title(payload) else None
+    else:
+        header = read_title(pipeline.provider, titleblock_images(images, layout['regions']),
+                            titleblock_page_numbers(images, layout['regions']), len(images), title_template)
+        bom = result.bom.to_dict()
+        payload = {'source_sha256': sha256(file_path), 'document_id': result.document_id,
+                   'bom': bom, 'outputs': result.outputs, 'model_info': bom.get('model_info'), 'layout': layout, **header}
+        title_for_checks = None if header['title_block'].get('extraction_status') == 'provider_failed' else header['title_block']
+
+    return {**payload, **_review_bom(cfg, file_path, pipeline.provider, images, payload['title_block'],
+                                    title_for_checks, bom, review_started)}
+
+
+def _review_bom(cfg, file_path, provider, images, title_block, title_for_checks, bom, started):
+    from .titleblock import extract_dims_and_balloons
     from .hybrid_inspection import inspect
     from .engineering_checks import inspection_config
-    inspection_cfg = inspection_config(cfg, file_path, tb['fields'])
-    inspection = inspect(pipeline.provider, images, tb["fields"], bom["components"],
-                         dims.get("dimensions"), dims.get("balloons"), inspection_cfg)
+    dims = extract_dims_and_balloons(provider, images)
+    inspection = inspect(provider, images, title_for_checks, bom['components'], dims.get('dimensions'),
+                         dims.get('balloons'), inspection_config(cfg, file_path, title_block))
     inspection['dimension_extraction'] = {key:dims.get(key) for key in ('status','warnings','events','model')}
     # BOM 管线计时在 bom.process_time_s；审图（定位/标题栏/尺寸/纠错）单独计时，
     # 这阶段在大图上往往远慢于识别本身，不让它隐身。
-    inspection["process_time_s"] = round(_time.time() - _t_review, 1)
+    inspection["process_time_s"] = round(time.time() - started, 1)
     note = balloon_bom_mismatch_note(dims.get("balloons"), bom.get("components"))
     if note:
         bom.setdefault("validation_issues", []).append(note)
-    issues = inspection["issues"]
-    from .corrections import sha256
-    return {"source_sha256": sha256(file_path), "document_id": result.document_id, "bom": bom, "title_block": tb["fields"],
-            "missing_required": tb["missing_required"],
-            "dimensions": dims.get("dimensions"), "balloons": dims.get("balloons"),
-            "issues": issues, "outputs": result.outputs,
-            "model_info": bom.get("model_info"), "inspection": inspection, "layout": layout, **enterprise_title}
+    return {'dimensions': dims.get('dimensions'), 'balloons': dims.get('balloons'),
+            'issues': inspection['issues'], 'inspection': inspection}
 
 
 def _job_doc(job_dir: str, file_path: str, options: dict) -> dict:
@@ -550,8 +588,10 @@ def _job_inspect(job_dir: str, file_path: str, options: dict) -> dict:
         print("[warn] BOM 识别失败，仅检查标题栏/尺寸: %s" % exc)
     from .hybrid_inspection import inspect
     from .engineering_checks import inspection_config
-    inspection = inspect(provider, images, tb["fields"], bom_comps,
-                         dims.get("dimensions"), dims.get("balloons"), inspection_config(cfg, file_path, tb['fields']))
+    inspection_cfg = inspection_config(cfg, file_path, tb['fields'])
+    title_for_checks = None if tb['fields'].get('extraction_status') == 'provider_failed' else tb['fields']
+    inspection = inspect(provider, images, title_for_checks, bom_comps,
+                         dims.get("dimensions"), dims.get("balloons"), inspection_cfg)
     inspection['dimension_extraction'] = {key:dims.get(key) for key in ('status','warnings','events','model')}
     issues = inspection["issues"]
     return {"document_id": os.path.splitext(os.path.basename(file_path))[0],
@@ -572,14 +612,21 @@ def _bom_document_from(data: dict) -> BomDocument:
                        components=comps)
 
 
-def _xlsx_bytes(rows, headers) -> bytes:
+def _xlsx_bytes(rows, headers, literal_strings=False) -> bytes:
     from openpyxl import Workbook
+    from openpyxl.cell.cell import ILLEGAL_CHARACTERS_RE
     wb = Workbook()
     ws = wb.active
     ws.title = "Sheet1"
-    ws.append(headers)
-    for r in rows:
-        ws.append(list(r))
+    for row in chain((headers,), rows):
+        values = list(row)
+        if literal_strings:
+            values = [ILLEGAL_CHARACTERS_RE.sub('', value) if isinstance(value, str) else value for value in values]
+        ws.append(values)
+        if literal_strings:
+            for cell in ws[ws.max_row]:
+                if isinstance(cell.value, str):
+                    cell.data_type = 's'
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
@@ -680,6 +727,35 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/static/"):
             return self._serve_static(path[len("/static/"):])
         try:
+            if path == '/api/enterprise/bom-output-template':
+                if not self._authorized():
+                    return self._json({'error': '请求令牌无效，请刷新页面后重试'}, 403)
+                from .bom_output_template import BOM_SYSTEM_FIELDS, TITLE_SYSTEM_FIELDS, from_legacy, title_field_presets
+                cfg = load_web_config()
+                template = from_legacy(cfg.get('enterprise') or {}, load_titleblock_template(cfg),
+                                       cfg.get('enterprise_output_name'))
+                return self._json({'template': template, 'title_sources': TITLE_SYSTEM_FIELDS,
+                                   'bom_sources': BOM_SYSTEM_FIELDS, 'title_presets': title_field_presets(),
+                                   'suggest_title_presets': not (CONFIG_PATH or 'enterprise_title_template' in cfg
+                                                                 or os.path.exists(_titleblock_template_path())),
+                                   'read_only': bool(CONFIG_PATH)})
+            if path == '/api/enterprise/profile/example':
+                filename = 'enterprise-profile.example.json'
+                with open(os.path.join(_ROOT, 'examples', filename), 'rb') as handle:
+                    return self._send(200, handle.read(), 'application/json; charset=utf-8', filename)
+            if path == '/api/enterprise/profile':
+                if not self._authorized():
+                    return self._json({'error': '请求令牌无效，请刷新页面后重试'}, 403)
+                from .enterprise import export_field_mapping
+                from .export import CSV_HEADERS
+                profile = load_web_config().get('enterprise') or {}
+                template = load_titleblock_template() or {}
+                return self._json({'export_fields': export_field_mapping(profile),
+                                   'detail_fields': profile.get('detail_fields', {}),
+                                   'constant_fields': profile.get('constant_fields', {}),
+                                   'component_sources': CSV_HEADERS,
+                                   'title_keys': [field['key'] for field in template.get('fields', [])],
+                                   'read_only': bool(CONFIG_PATH)})
             if path == '/api/enterprise/titleblock-template':
                 from .titleblock_template import SOURCE_LABELS
                 return self._json({'template': load_titleblock_template(), 'sources': SOURCE_LABELS})
@@ -745,15 +821,33 @@ class Handler(BaseHTTPRequestHandler):
         if not self._authorized():
             return self._json({"error": "请求令牌无效，请刷新页面后重试"}, 403)
         try:
+            if path in ('/api/enterprise/bom-output-template', '/api/enterprise/bom-output-template/preview'):
+                from .bom_output_template import from_legacy, import_template, to_legacy
+                if path.endswith('/preview'):
+                    cfg = load_web_config()
+                    template, notice = import_template(self._read_json_body(), cfg.get('enterprise') or {},
+                                                      load_titleblock_template(cfg), cfg.get('enterprise_output_name'))
+                    return self._json({'template': template, 'notice': notice})
+                if CONFIG_PATH:
+                    return self._json({'error': '固定部署配置模式下请修改部署配置文件'}, 409)
+                name, profile, title = to_legacy(self._read_json_body())
+                save_web_settings({'enterprise': profile, 'enterprise_title_template': title,
+                                   'enterprise_output_name': name})
+                return self._json({'template': from_legacy(profile, title, name)})
             if path == '/api/enterprise/titleblock-template':
                 from .titleblock_template import validate_template
                 body = self._read_json_body()
                 if not isinstance(body, dict) or set(body) != {'template'}:
                     raise ValueError('请求必须包含 template（模板对象或 null）')
                 template = None if body['template'] is None else validate_template(body['template'])
-                _atomic_json(_titleblock_template_path(), template)
+                if 'enterprise_title_template' in load_web_config() and not CONFIG_PATH:
+                    save_web_settings({'enterprise_title_template': template})
+                else:
+                    _atomic_json(_titleblock_template_path(), template)
                 return self._json({'template': template})
             if path == '/api/enterprise/profile':
+                if CONFIG_PATH:
+                    return self._json({'error': '固定部署配置模式下请在部署配置文件中修改企业配置'}, 409)
                 from .enterprise import validate_profile
                 profile = validate_profile(self._read_json_body())
                 save_web_settings({'enterprise': profile})
@@ -820,10 +914,13 @@ class Handler(BaseHTTPRequestHandler):
 
     # ---------- 任务端点 ----------
     def _api_job_bom(self):
+        from .bom_pages import OUTPUT_MODES
         form = self._form()
         options = json.loads(form.getvalue("options") or "{}") if hasattr(form, "getvalue") else {}
         if not isinstance(options, dict) or ('preprocess' in options and not isinstance(options['preprocess'], dict)):
             raise ValueError('options 和 preprocess 必须为 JSON 对象')
+        if 'output_mode' in options and options['output_mode'] not in OUTPUT_MODES:
+            raise ValueError('output_mode 必须为 merged（合并）或 per_page（每页独立）')
         job_id, (file_path,) = _prepare_upload_job('bom', form, ['file'])
         _jobs[job_id]["source_file"] = file_path
         _run_async(job_id, lambda: _job_bom(_jobs[job_id]["dir"], file_path, options))
@@ -918,6 +1015,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         if 'bom' not in result:
             raise ValueError('任务不是 BOM 任务')
+        if result.get('incomplete_pages') or result.get('title_block_notice'):
+            raise ValueError('识别未完成或各页图号不同，不能保存整份装配关系')
         if type(body.get('bom_revision', 0)) is not int or body.get('bom_revision', 0) != result['bom'].get('revision', 0):
             raise ValueError('BOM版本已变化，旧装配关系不能提交，请重新加载并复核')
         reviewer = str(body.get('reviewer') or '').strip()
@@ -976,9 +1075,11 @@ class Handler(BaseHTTPRequestHandler):
         comps = body.get("components", [])
         if not isinstance(comps, list) or any(not isinstance(c, dict) for c in comps):
             raise ValueError('components 必须为对象数组')
-        from .schema import INT_FIELDS, FLOAT_FIELDS, TEXT_FIELDS, validate_components
+        from .schema import INT_FIELDS, FLOAT_FIELDS, TEXT_FIELDS, valid_detail_values, validate_components
         import math
         for row, comp in enumerate(comps, 1):
+            if 'detail_values' in comp and not valid_detail_values(comp['detail_values']):
+                raise ValueError('第%d行自定义明细字段必须是字段键到文本的映射' % row)
             for key in INT_FIELDS + FLOAT_FIELDS:
                 value = comp.get(key)
                 if value is None:
@@ -996,6 +1097,13 @@ class Handler(BaseHTTPRequestHandler):
         job = _jobs.get(job_id)
         if job_id and (not job or job.get('kind') != 'bom' or job.get('status') != 'done'):
             raise ValueError('BOM任务不存在或未完成')
+        if job and (not job['result'].get('bom') or job['result'].get('incomplete_pages')):
+            raise ValueError('逐页独立结果或不完整的合并结果暂不支持保存 BOM 编辑稿')
+        if job and job['result'].get('output_mode') == 'merged':
+            # Source-page identity controls page-scoped title exports and is not editable.
+            previous_rows = job['result']['bom']['components']
+            if ([c.get('source_page') for c in comps] != [c.get('source_page') for c in previous_rows]):
+                raise ValueError('已识别的来源页不能更改，也不能修改原始行数')
         parent = os.path.join(DATA_DIR, "reviewed")
         if not os.path.isdir(parent):
             os.makedirs(parent, exist_ok=True)
@@ -1085,29 +1193,63 @@ class Handler(BaseHTTPRequestHandler):
         result = self._job_result(job_id)
         if not result:
             return
-        fmt = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query).get("fmt", ["json"])[0]
         query = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+        fmt = query.get('fmt', ['json'])[0]
+        output_mode = result.get('output_mode')
+        if output_mode == 'per_page':
+            try:
+                page = int(query.get('page', [''])[0])
+            except ValueError:
+                return self._json({'error': '逐页独立结果必须指定要下载的原始页码'}, 400)
+            state = next((status for status in result['page_statuses'] if status['page'] == page), None)
+            if not state:
+                return self._json({'error': '图纸页码不存在'}, 404)
+            if state['status'] != 'recognized':
+                return self._json({'error': f'第{page}页没有可导出的 BOM，请查看页面识别状态'}, 409)
+            result = next(unit for unit in result['page_results'] if unit['page'] == page)
+        elif output_mode == 'merged':
+            if result['incomplete_pages']:
+                pages = '、'.join(map(str, result['incomplete_pages']))
+                return self._json({'error': f'第{pages}页尚未完成识别，已暂停合并导出，请核对原图后重新识别'}, 409)
+            if not result['bom']['components']:
+                return self._json({'error': '未提取到明细行，没有可导出的 BOM'}, 409)
+
+        doc_id = str(result.get('document_id') or (result.get('bom') or {}).get('document_id') or job_id)
         if query.get('profile') == ['enterprise']:
             from .enterprise import mapped_components
             from .export import display_value
-            mapped = mapped_components((result.get('bom') or {}).get('components', []), load_web_config().get('enterprise') or {})
+            page_titles = ({page: value.get('enterprise_title_block', {}) for page, value in result['page_title_blocks'].items()}
+                           if output_mode == 'merged' else None)
+            mapped = mapped_components((result.get('bom') or {}).get('components', []), load_web_config().get('enterprise') or {},
+                                       result.get('enterprise_title_block'), page_title_blocks=page_titles)
+            filename = f'{doc_id}_企业BOM' if output_mode else 'enterprise_bom'
             display_rows = [{label: display_value(field, row.get(label))
                              for field, label in mapped['field_mapping'].items()} for row in mapped['rows']]
             if fmt == 'csv':
+                def csv_literal(value):
+                    # Prevent spreadsheets from interpreting printed/custom text as formulas.
+                    if isinstance(value, str) and value.lstrip().startswith(('=', '+', '-', '@')):
+                        return "'" + value
+                    return value
+
                 buffer = io.StringIO()
-                writer = csv.DictWriter(buffer, fieldnames=list(mapped['field_mapping'].values()))
-                writer.writeheader()
-                writer.writerows(display_rows)
-                return self._send(200, buffer.getvalue().encode('utf-8-sig'), 'text/csv; charset=utf-8', 'enterprise_bom.csv')
+                writer = csv.writer(buffer)
+                writer.writerow([csv_literal(label) for label in mapped['field_mapping'].values()])
+                writer.writerows([csv_literal(value) for value in row.values()] for row in display_rows)
+                return self._send(200, buffer.getvalue().encode('utf-8-sig'), 'text/csv; charset=utf-8', filename + '.csv')
             if fmt == 'xlsx':
-                body = _xlsx_bytes([list(row.values()) for row in display_rows], list(mapped['field_mapping'].values()))
-                return self._send(200, body, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', 'enterprise_bom.xlsx')
+                body = _xlsx_bytes([row.values() for row in display_rows], list(mapped['field_mapping'].values()),
+                                   literal_strings=True)
+                return self._send(200, body, 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', filename + '.xlsx')
             if 'enterprise_title_block' in result:
                 mapped['title_block'] = result['enterprise_title_block']
+            if output_mode == 'per_page':
+                mapped['source_page'] = result['page']
+            if page_titles and any(page_titles.values()):
+                mapped['page_title_blocks'] = page_titles
             body = json.dumps(mapped, ensure_ascii=False, allow_nan=False, indent=2).encode('utf-8')
-            return self._send(200, body, 'application/json; charset=utf-8', 'enterprise_bom.json')
+            return self._send(200, body, 'application/json; charset=utf-8', filename + '.json')
         bom_doc = _bom_document_from(result.get("bom") or {})
-        doc_id = str(result.get("document_id") or job_id)
         if fmt == "csv":
             from .export import CSV_HEADERS, EXPORT_COLUMNS, display_value
             csv_buf = io.StringIO()
@@ -1129,7 +1271,15 @@ class Handler(BaseHTTPRequestHandler):
                     body = handle.read()
             return self._send(200, body,
                               'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet', doc_id + '.xlsx')
-        body = json.dumps(result.get("bom") or {}, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
+        data = dict(result.get('bom') or {})
+        if output_mode:
+            data.update(output_mode=output_mode, title_block=result.get('title_block', {}))
+            if output_mode == 'per_page':
+                data['source_page'] = result['page']
+            else:
+                data['page_statuses'] = result['page_statuses']
+                data['page_title_blocks'] = {page: value['title_block'] for page, value in result['page_title_blocks'].items()}
+        body = json.dumps(data, ensure_ascii=False, indent=2, allow_nan=False).encode("utf-8")
         self._send(200, body, "application/json; charset=utf-8", doc_id + ".json")
 
     def _api_export_doc(self, job_id: str):

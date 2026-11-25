@@ -14,6 +14,7 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from .config import cfg_get, resolve_output_dir
+from .enterprise import configured_detail_fields, detail_read_prompt, read_detail_values
 from .export import export_bom
 from .ingestion import IngestionError, load_document
 from .knowledge import build_knowledge
@@ -36,6 +37,7 @@ class ProcessResult(object):
     process_time_s: float = 0.0
     agent_events: List[Dict[str, Any]] = field(default_factory=list)
     pages: List[Any] = field(default_factory=list, repr=False)
+    page_statuses: List[Dict[str, Any]] = field(default_factory=list)
 
 
 class BomPipeline(object):
@@ -48,20 +50,65 @@ class BomPipeline(object):
         self.kb = build_knowledge(config.get("knowledge") or {}, self.base_dir)
         self.prompt_builder = get_prompt_builder(str(cfg_get(config, "recognition.prompt_version", "v1")))
         self.agent = AgentLoop(self.provider, cfg_get(config, "agent_loop.max_attempts", 3))
+        self.detail_fields = configured_detail_fields(config.get('enterprise') or {})
+        self._layout_cache: Optional[Dict[str, Any]] = None
+        self._layout_images = ()
 
-    def _recognize(self, images, prompt, result, page_no):
-        if cfg_get(self.config,'recognition.detail_crops',True) and any(max(image.size)>1200 for image in images):
-            from .installation_review import review_images
-            images,note=review_images(images)
-            prompt+='\n【明细表原文核对】附加放大图是原页的局部，不是新页；请逐行核对序号、名称及数量。不得用相似功能名称或轴系常识替换明细表原文，不得重复计数。'+note
-        outcome = self.agent.run(images, prompt, validate_bom_response)
+    def layout(self, images: List[Any]) -> Dict[str, Any]:
+        """Locate drawing regions once per document; reused by crops and title block.
+
+        A failed or disabled lookup is cached too, so a provider outage does not
+        cost one extra model call per stage.
+        """
+        if (self._layout_cache is not None and len(self._layout_images) == len(images)
+                and all(a is b for a, b in zip(self._layout_images, images))):
+            return self._layout_cache
+        self._layout_images = tuple(images)
+        from .drawing_layout import locate_regions
+        enabled = bool(cfg_get(self.config, "recognition.region_crops", True))
+        if not enabled:
+            self._layout_cache = {'status': 'disabled', 'regions': [], 'events': [],
+                                   'warning': '配置已关闭区域裁切（recognition.region_crops）'}
+            return self._layout_cache
+        template = (self.config.get('enterprise') or {}).get('drawing_template')
+        self._layout_cache = locate_regions(self.provider, images, template)
+        return self._layout_cache
+
+    def _recognize(self, images, prompt, result, page_no, doc_images=None):
+        """Run one recognition call, prepending located title-block/parts-table crops.
+
+        `doc_images` is the full document page list; region coordinates are page
+        numbers in that list, while `images` may be a single page (per_page mode).
+        Small pages stay single-image: below the detail threshold the whole page is
+        already legible, and a layout call would only add latency.
+        """
+        if cfg_get(self.config, 'recognition.detail_crops', True):
+            threshold = int(cfg_get(self.config, 'recognition.detail_crop_min_side', 1200) or 0)
+            if any(max(image.size) > threshold for image in images):
+                source = list(doc_images) if doc_images is not None else list(images)
+                located = self.layout(source)
+                regions = located.get('regions') or None
+                from .installation_review import review_images
+                images, note = review_images(images, regions, source)
+                if regions:
+                    prompt += ('\n【明细表原文核对】附加裁切图是按版面定位出的标题栏/明细表区域，'
+                               '不是新页；请逐行核对序号、名称及数量。不得用相似功能名称或轴系常识'
+                               '替换明细表原文，不得重复计数。')
+                else:
+                    prompt += ('\n【明细表原文核对】附加放大图是原页的局部，不是新页；请逐行核对'
+                               '序号、名称及数量。不得用相似功能名称或轴系常识替换明细表原文，不得重复计数。')
+                prompt += note
+        outcome = self.agent.run(images, prompt + detail_read_prompt(self.detail_fields), validate_bom_response)
         result.agent_events.extend(dict(event, page_no=page_no) for event in outcome.events)
         if outcome.status != "validated":
             raise ProviderError("Agent loop 校验未通过，需复核：%s" % outcome.events[-1]["errors"])
+        for component in outcome.value:
+            component.detail_values = read_detail_values(component._detail_reads, self.detail_fields)
         return outcome.response, outcome.value
 
     # ------------------------------------------------------------------
-    def process_file(self, path: str, retain_pages: bool = False) -> ProcessResult:
+    def process_file(self, path: str, retain_pages: bool = False, paged_output: bool = False) -> ProcessResult:
+        self._layout_cache, self._layout_images = None, ()
         path = os.path.abspath(path)
         doc_id = os.path.splitext(os.path.basename(path))[0]
         started = time.time()
@@ -75,7 +122,8 @@ class BomPipeline(object):
         if retain_pages:
             result.pages = pages
 
-        mode = str(cfg_get(self.config, "recognition.mode", "per_page"))
+        mode = "per_page" if paged_output else str(cfg_get(self.config, "recognition.mode", "per_page"))
+        doc_images = [getattr(p, 'original_image', None) or p.image for p in pages]
         trace_pages: List[Dict[str, Any]] = []
         pages_of_components: List[List[BomComponent]] = []
         try:
@@ -85,7 +133,7 @@ class BomPipeline(object):
                     int(cfg_get(self.config, "knowledge.top_k", 3)))
                 prompt = self.prompt_builder(mode="whole_doc", total_pages=len(pages),
                                              knowledge_snippets=snippets)
-                resp, comps = self._recognize([getattr(p,'original_image',None) or p.image for p in pages], prompt, result, 0)
+                resp, comps = self._recognize(doc_images, prompt, result, 0, doc_images)
                 for c in comps:
                     if c.source_page is None:
                         c.source_page = 1
@@ -98,12 +146,26 @@ class BomPipeline(object):
                 for page in pages:
                     prompt = self.prompt_builder(mode="per_page", page_no=page.page_no,
                                                  total_pages=len(pages), knowledge_snippets=snippets)
-                    resp, comps = self._recognize([getattr(page,'original_image',None) or page.image], prompt, result, page.page_no)
+                    if paged_output:
+                        prompt += ('\n【按原页提取】逐表、逐行抄录当前页所有明细栏，保留原序号和数量。'
+                                   '只输出真实明细行；如果本页没有明细行，返回空 components。'
+                                   '不要用图中球标或其他页的内容补造明细行。')
+                    try:
+                        resp, comps = self._recognize([doc_images[page.page_no - 1]], prompt, result,
+                                                      page.page_no, doc_images)
+                    except ProviderError as exc:
+                        if not paged_output:
+                            raise
+                        result.page_statuses.append({'page': page.page_no, 'status': 'failed', 'rows': None,
+                                                     'message': str(exc)[:500]})
+                        continue
                     for c in comps:
-                        if c.source_page is None:
-                            c.source_page = page.page_no
+                        c.source_page = page.page_no
                     pages_of_components.append(comps)
                     trace_pages.append(self._trace_entry(page.page_no, resp, len(comps), []))
+                    if paged_output:
+                        result.page_statuses.append({'page': page.page_no, 'status': 'recognized' if comps else 'empty',
+                                                     'rows': len(comps)})
         except ProviderError as exc:
             result.errors.append(str(exc))
             result.process_time_s = time.time() - started
@@ -116,7 +178,7 @@ class BomPipeline(object):
             return result
 
         policy = str(cfg_get(self.config, "recognition.duplicate_quantity_policy", "keep_max"))
-        preserve_rows = bool(cfg_get(self.config, "recognition.preserve_printed_rows", True))
+        preserve_rows = paged_output or bool(cfg_get(self.config, "recognition.preserve_printed_rows", True))
         if preserve_rows:
             merged = [c for page_comps in pages_of_components for c in page_comps]
             merge_notes = []
@@ -124,7 +186,7 @@ class BomPipeline(object):
             merged, merge_notes = merge_components(pages_of_components, quantity_policy=policy)
 
         min_conf = float(cfg_get(self.config, "recognition.min_confidence", 0.0) or 0.0)
-        if min_conf > 0:
+        if min_conf > 0 and not paged_output:
             kept, dropped = [], []
             for c in merged:
                 (dropped if (c.confidence is not None and c.confidence < min_conf) else kept).append(c)
@@ -133,8 +195,12 @@ class BomPipeline(object):
             merged = kept
 
         strict = bool(cfg_get(self.config, "validation.strict", False))
-        issues = validate_components(merged, strict=strict,
-                                     allow_repeated_rows=preserve_rows)
+        if paged_output:
+            # Start with page-local findings. The Web layer builds the chosen output scope.
+            issues = [f'第{page[0].source_page}页：{message}' for page in pages_of_components if page
+                      for message in validate_components(page, allow_repeated_rows=True)]
+        else:
+            issues = validate_components(merged, strict=strict, allow_repeated_rows=preserve_rows)
 
         bom = BomDocument(
             document_id=doc_id,
@@ -145,15 +211,23 @@ class BomPipeline(object):
                 "prompt_version": str(cfg_get(self.config, "recognition.prompt_version", "v1")),
                 "recognition_mode": mode,
                 "preserve_printed_rows": preserve_rows,
+                **({'enterprise_detail_fields': list(self.detail_fields)} if self.detail_fields else {}),
                 "knowledge_base": self.kb.describe(),
                 "pages": len(pages),
                 "source_sha256": sha256(path),
-                "agent_loop": {"status": "validated", "events": result.agent_events},
+                "agent_loop": {"status": "partial" if any(p['status'] == 'failed' for p in result.page_statuses) else "validated",
+                               "events": result.agent_events},
             },
             components=merged,
             validation_issues=sorted(set(merge_notes + issues)),
             process_time_s=round(time.time() - started, 3),
         )
+
+        if paged_output:
+            # No ambiguous aggregate artifact on disk: the chosen scope controls Web exports.
+            self._write_trace(self.base_dir, doc_id, bom, trace_pages, [])
+            result.status, result.bom, result.process_time_s = 'ok', bom, bom.process_time_s or 0.0
+            return result
 
         out_dir = resolve_output_dir(self.config)
         from .assembly import infer_assembly

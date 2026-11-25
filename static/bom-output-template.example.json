@@ -1,0 +1,259 @@
+{
+  "schema_version": 1,
+  "name": "甲方工程图 BOM 示例",
+  "title_fields": [
+    {
+      "output": "图名",
+      "sources": [
+        {
+          "type": "system",
+          "key": "drawing_name"
+        }
+      ]
+    },
+    {
+      "output": "图号",
+      "sources": [
+        {
+          "type": "system",
+          "key": "drawing_no"
+        }
+      ]
+    },
+    {
+      "output": "版本",
+      "sources": [
+        {
+          "type": "system",
+          "key": "revision"
+        }
+      ]
+    },
+    {
+      "output": "图纸材料",
+      "sources": [
+        {
+          "type": "system",
+          "key": "material"
+        }
+      ]
+    },
+    {
+      "output": "比例",
+      "sources": [
+        {
+          "type": "system",
+          "key": "scale"
+        }
+      ]
+    },
+    {
+      "output": "图纸标注重量",
+      "sources": [
+        {
+          "type": "system",
+          "key": "weight"
+        }
+      ]
+    },
+    {
+      "output": "日期",
+      "sources": [
+        {
+          "type": "system",
+          "key": "date"
+        }
+      ]
+    },
+    {
+      "output": "设计部门",
+      "sources": [
+        {
+          "type": "drawing",
+          "labels": [
+            "设计部门",
+            "设计单位"
+          ]
+        }
+      ]
+    }
+  ],
+  "bom_columns": [
+    {
+      "output": "序号",
+      "sources": [
+        {
+          "type": "system",
+          "key": "item_no"
+        }
+      ]
+    },
+    {
+      "output": "图号/件号",
+      "sources": [
+        {
+          "type": "system",
+          "key": "part_number"
+        }
+      ]
+    },
+    {
+      "output": "名称(中文)",
+      "sources": [
+        {
+          "type": "system",
+          "key": "name_zh"
+        }
+      ]
+    },
+    {
+      "output": "名称(英文)",
+      "sources": [
+        {
+          "type": "system",
+          "key": "name_en"
+        }
+      ]
+    },
+    {
+      "output": "功能系统",
+      "sources": [
+        {
+          "type": "system",
+          "key": "category"
+        }
+      ]
+    },
+    {
+      "output": "规格型号",
+      "sources": [
+        {
+          "type": "system",
+          "key": "specification"
+        }
+      ]
+    },
+    {
+      "output": "材料",
+      "sources": [
+        {
+          "type": "system",
+          "key": "material"
+        }
+      ]
+    },
+    {
+      "output": "数量",
+      "sources": [
+        {
+          "type": "system",
+          "key": "quantity"
+        }
+      ]
+    },
+    {
+      "output": "重量(g)",
+      "sources": [
+        {
+          "type": "system",
+          "key": "weight"
+        }
+      ]
+    },
+    {
+      "output": "单位",
+      "sources": [
+        {
+          "type": "system",
+          "key": "unit"
+        }
+      ]
+    },
+    {
+      "output": "装配位置",
+      "sources": [
+        {
+          "type": "system",
+          "key": "position"
+        }
+      ]
+    },
+    {
+      "output": "供应商",
+      "sources": [
+        {
+          "type": "system",
+          "key": "supplier"
+        }
+      ]
+    },
+    {
+      "output": "备注",
+      "sources": [
+        {
+          "type": "system",
+          "key": "remark"
+        }
+      ]
+    },
+    {
+      "output": "待核实",
+      "sources": [
+        {
+          "type": "system",
+          "key": "needs_review"
+        }
+      ]
+    },
+    {
+      "output": "核实原因",
+      "sources": [
+        {
+          "type": "system",
+          "key": "review_reasons"
+        }
+      ]
+    },
+    {
+      "output": "来源页",
+      "sources": [
+        {
+          "type": "system",
+          "key": "source_page"
+        }
+      ]
+    },
+    {
+      "output": "所属图纸图号",
+      "sources": [
+        {
+          "type": "title",
+          "key": "图号"
+        }
+      ]
+    },
+    {
+      "output": "涂层代号",
+      "sources": [
+        {
+          "type": "drawing",
+          "key": "涂层代号",
+          "labels": [
+            "涂层代号",
+            "涂层编码"
+          ]
+        }
+      ]
+    },
+    {
+      "output": "工厂代码",
+      "sources": [
+        {
+          "type": "fixed",
+          "key": "工厂代码",
+          "value": "A01"
+        }
+      ]
+    }
+  ]
+}

@@ -9,7 +9,7 @@ import json
 import re
 from typing import Any, Dict, List
 
-from .providers import VisionProvider
+from .providers import ProviderError, VisionProvider
 
 TASK_MARKER = "TASK:TITLEBLOCK"
 
@@ -81,7 +81,15 @@ def extract_titleblock(provider: VisionProvider, images: List, total_pages: int 
         resp = provider.analyze(images, prompt)
         fields = parse_titleblock_response(resp.raw_text)
     else:
-        outcome = AgentLoop(provider, 3).run(images, prompt, validate_titleblock)
+        loop = AgentLoop(provider, 3)
+        try:
+            outcome = loop.run(images, prompt, validate_titleblock)
+        except ProviderError as exc:
+            # 标题栏属于复审阶段的可选产出：模型不可用时不应把已识别成功的 BOM 一起丢掉。
+            return {"fields": {"extraction_status": "provider_failed",
+                               "extraction_warnings": ["标题栏提取模型调用失败：%s" % exc]},
+                    "missing_required": [], "model": getattr(provider, "model", ""),
+                    "latency_s": 0.0}
         resp, fields = outcome.response, outcome.value
         fields['extraction_status'] = outcome.status
         fields['extraction_warnings'] = outcome.events[-1]['errors']
@@ -191,7 +199,17 @@ def extract_dims_and_balloons(provider: VisionProvider, images: List) -> Dict[st
     observed,note=review_images(images)
     if not note:
         observed=images
-    outcome=loop.run(observed,_DIMS_PROMPT+note+'\n局部与整页是同一图，不重复计数。bbox使用原始整页坐标，source_page不得使用裁切图片的序号。',validate)
+    try:
+        outcome=loop.run(observed,_DIMS_PROMPT+note+'\n局部与整页是同一图，不重复计数。bbox使用原始整页坐标，source_page不得使用裁切图片的序号。',validate)
+    except ProviderError as exc:
+        # 尺寸/球标是复审输入：模型不可用时返回空集合并标记 provider_failed，
+        # 由上层按"依据不足"处理，不能让已识别成功的 BOM 一起失败。
+        return {"dimensions": [], "balloons": [], "status": "provider_failed",
+                "warnings": ["尺寸与引出序号提取模型调用失败：%s" % exc],
+                "events": loop.last_result.events if loop.last_result else [],
+                "model": getattr(provider, "model", ""),
+                "detail_images": len(observed)-len(images),
+                "source_image_sizes": [list(image.size) for image in images if hasattr(image, 'size')]}
     payload=outcome.value if outcome.status=='validated' else {}
     result = {"dimensions": [], "balloons": []}
     if isinstance(payload, dict):

@@ -98,8 +98,9 @@ function bindDrop(dropSel, inputSel, onFile = () => {}) {
 
 /* ───────── BOM 识别 ───────── */
 let bomJobId = null, bomComponents = [], BOM_COLS = null, bomRevision = 0;
+let bomPageData = null, bomEditAllowed = true;
 bindDrop("#bom-drop", "#bom-file", () => {
-  bomJobId = null; insJobId = null; insSourceSha = null; insPreviewImage = null; insSelectedBox = null;
+  bomJobId = null; bomPageData = null; insJobId = null; insSourceSha = null; insPreviewImage = null; insSelectedBox = null;
   insRegionBox = null; insImageRequest++; insDragStart = null;
   $("#bom-result").classList.add("hidden");
   $("#ins-correct-download").classList.add("hidden");
@@ -107,15 +108,21 @@ bindDrop("#bom-drop", "#bom-file", () => {
   $("#ins-page").value = "1";
 });
 
+$('#bom-output-mode').addEventListener('change', () => {
+  $('#bom-start').textContent = $('#bom-output-mode').value === 'per_page' ? '识别并生成各页 BOM' : '生成 BOM 并检查图纸';
+});
+
 $("#bom-start").addEventListener("click", async () => {
   const file = $("#bom-file").files[0];
   if (!file) return showError("bom", "请先选择图纸文件");
+  bomJobId = null; bomPageData = null;
   hideError("bom"); showProgress("bom");
   $("#bom-result").classList.add("hidden");
   const fd = new FormData();
   fd.append("file", file);
   fd.append("options", JSON.stringify({
     provider: $("#bom-provider").value || null,
+    output_mode: $("#bom-output-mode").value,
     preprocess: {
       deskew: $("#bom-pre-deskew").checked,
       denoise: $("#bom-pre-denoise").checked,
@@ -129,9 +136,102 @@ $("#bom-start").addEventListener("click", async () => {
   } catch (e) { showError("bom", e.message); hideProgress("bom"); }
 });
 
+function bomStatusText(page) {
+  if (!page) return '未取得本页状态';
+  if (page.status === 'recognized') return `已识别 · ${page.rows} 行`;
+  if (page.status === 'empty') return '未提取到明细行（请核对原图）';
+  if (page.status === 'failed') return '识别失败（不计为零行）';
+  return '疑似有明细栏，但没有读出行，需复核';
+}
+
+function bomPageStatusRows(statuses) {
+  return statuses.map(page => [page.page, bomStatusText(page), page.message || '']);
+}
+
+function bomExportUrl(format, enterprise = false) {
+  if (!bomJobId) throw new Error('请先完成 BOM 识别。');
+  const query = new URLSearchParams({fmt: format});
+  if (enterprise) query.set('profile', 'enterprise');
+  if (bomPageData?.output_mode === 'per_page') {
+    const page = Number($('#bom-result-page').value);
+    if (!bomPageData.page_statuses.some(status => status.page === page && status.status === 'recognized')) {
+      throw new Error(`第 ${page} 页没有可导出的 BOM，请查看分页识别状态。`);
+    }
+    query.set('page', String(page));
+  } else if (bomPageData?.output_mode === 'merged') {
+    if (bomPageData.incomplete_pages.length) throw new Error('部分页面识别未完成，已暂停合并导出。');
+    if (!bomPageData.bom.components.length) throw new Error('未提取到明细行，没有可导出的 BOM。');
+  }
+  return '/api/export/bom/' + encodeURIComponent(bomJobId) + '?' + query.toString();
+}
+
+function renderBomPage() {
+  const page = Number($('#bom-result-page').value);
+  const status = bomPageData.page_statuses.find(item => item.page === page);
+  const unit = bomPageData.page_results.find(item => item.page === page);
+  const components = unit?.bom.components || [];
+  $('#bom-page-original').href = '/api/pages/' + encodeURIComponent(bomJobId) + '?page=' + page;
+  $('#bom-page-current-status').textContent = bomStatusText(status) + (unit && status?.status === 'recognized'
+    ? '；已读出数量合计 ' + unit.bom.summary.total_quantity : '') + (status?.message ? '；' + status.message : '');
+  $('#bom-page-export').disabled = $('#bom-page-enterprise-export').disabled = status?.status !== 'recognized';
+  renderKV('#bom-page-titleblock', unit?.title_block || {});
+  if (unit?.title_block?.extraction_warnings?.length) {
+    $('#bom-page-titleblock').insertAdjacentHTML('beforeend', '<p class="alert warn">' + esc(unit.title_block.extraction_warnings.join('；')) + '</p>');
+  }
+  $('#bom-page-components').innerHTML = components.length ? dethRenderBomTable(components, unit.bom.model_info?.enterprise_detail_fields) : '';
+  $('#bom-page-validation').textContent = (unit?.bom.validation_issues || []).join('；');
+  if (unit) renderIssues('#bom-page-issues', unit.issues || []);
+  else $('#bom-page-issues').textContent = '本页未完成识别，未执行校验。';
+}
+
+$('#bom-result-page').addEventListener('change', renderBomPage);
+for (const [selector, enterprise] of [['#bom-page-export', false], ['#bom-page-enterprise-export', true]]) {
+  $(selector).addEventListener('click', () => {
+    try { window.open(bomExportUrl($('#bom-page-format').value, enterprise), '_blank'); }
+    catch (error) { showError('bom', error.message); }
+  });
+}
+
+function renderBomPaging(res) {
+  const statuses = res.page_statuses || [];
+  const separate = res.output_mode === 'per_page';
+  const incomplete = res.incomplete_pages || [];
+  $('#bom-page-status-panel').classList.toggle('hidden', !statuses.length);
+  $('#bom-merged-view').classList.toggle('hidden', separate);
+  $('#bom-per-page-view').classList.toggle('hidden', !separate);
+  if (statuses.length) {
+    const messages = [res.model_info?.provider === 'mock' && '离线演示：行数据不来自原图。',
+      incomplete.length && ('第 ' + incomplete.join('、') + ' 页识别未完成。' + (separate ? '其他已识别的页面仍可单独下载。' : '已暂停合并导出；核对原图后请重新识别。')),
+      res.title_block_notice];
+    if (!messages.some(Boolean)) messages.push('已读取 ' + statuses.length + ' 页，请结合原图核对。');
+    $('#bom-page-mode').textContent = separate ? '每页单独生成 BOM' : '合并为一份 BOM';
+    $('#bom-page-summary').textContent = messages.filter(Boolean).join(' ');
+    $('#bom-page-summary').className = incomplete.length || res.title_block_notice ? 'alert warn' : 'hint';
+    fillTable('#bom-page-status-table', ['原始页码', '明细识别状态', '说明'], bomPageStatusRows(statuses));
+    const headers = Object.entries(res.page_title_blocks || {});
+    $('#bom-page-titles').classList.toggle('hidden', separate || headers.length < 2);
+    if (!separate && headers.length >= 2) {
+      $('#bom-page-titles-list').innerHTML = headers.map(([page]) => '<h3>第 ' + esc(page) + ' 页</h3><div class="kv-grid" id="bom-scope-title-' + esc(page) + '"></div>').join('');
+      headers.forEach(([page, data]) => renderKV('#bom-scope-title-' + page, data.title_block || {}));
+    }
+  }
+  if (separate) {
+    $('#bom-result-page').replaceChildren(...statuses.map(page => new Option('第 ' + page.page + ' 页', page.page)));
+    $('#bom-result-page').value = String((statuses.find(page => page.status === 'recognized') || statuses[0]).page);
+    renderBomPage();
+  }
+}
+
 function renderBomResult(res) {
   hideProgress("bom");
   $("#bom-result").classList.remove("hidden");
+  bomPageData = res.output_mode ? res : null;
+  renderBomPaging(res);
+  if (res.output_mode === 'per_page') { bomComponents = []; return; }
+  bomEditAllowed = !(res.incomplete_pages || []).length;
+  $('#bom-save').disabled = !bomEditAllowed;
+  $('#bom-list-panel [data-go="review"]').classList.toggle('hidden', !bomEditAllowed);
+  $('#assembly-save').disabled = !bomEditAllowed || !!res.title_block_notice;
   renderKV("#bom-titleblock", res.title_block || {});
   const enterpriseTitle = $('#bom-enterprise-title');
   if (enterpriseTitle) {
@@ -145,10 +245,12 @@ function renderBomResult(res) {
         template.missing_keys.length && '缺失或未读出：' + template.missing_keys.join('、'),
         template.conflicts.length && '来源值不同，已按优先级取值，请复核：' + template.conflicts.join('、'),
       ].filter(Boolean).join('；');
-      $('#bom-enterprise-title-download').href = '/api/export/bom/' + encodeURIComponent(bomJobId) + '?profile=enterprise&fmt=json';
+      const download = $('#bom-enterprise-title-download');
+      try { download.href = bomExportUrl('json', true); download.classList.remove('hidden'); }
+      catch (_) { download.removeAttribute('href'); download.classList.add('hidden'); }
     }
   }
-  $('#bom-result .badge').textContent = res.model_info?.provider === 'mock' ? '离线演示数据 · 与上传内容无关，不可用于准确率验收' : '识别结果 · 待人工复核';
+  $('#bom-merged-view .result-toolbar .badge').textContent = res.model_info?.provider === 'mock' ? '离线演示数据 · 与上传内容无关，不可用于准确率验收' : '识别结果 · 待人工复核';
   const warnings = res.title_block?.extraction_warnings || [];
   if (warnings.length) $('#bom-titleblock').insertAdjacentHTML('beforeend', '<p class="alert error">标题栏证据校验未通过：' + esc(warnings.join('；')) + '</p>');
   bomComponents = res.bom.components;
@@ -163,8 +265,7 @@ function renderBomResult(res) {
   const regionLabels = {frame:'图框',title_block:'标题栏',bom_table:'明细栏',technical_notes:'技术要求',view:'视图'};
   $('#drawing-regions').innerHTML = (res.layout?.regions || []).map(r =>
     '<button class="region-locate" data-page="' + esc(r.source_page) + '" data-box="' + esc(JSON.stringify(r.bbox)) + '" data-warning="' + esc(r.bbox_warning || '模型粗定位，范围完整性待复核') + '" title="' + esc(r.evidence) + '">' + esc(regionLabels[r.kind] || r.kind) + ' · 第' + esc(r.source_page) + '页 · ' + esc(r.bbox_status === 'refined' ? '已补边（待复核）' : r.bbox_status === 'uncertain' ? '范围待调整' : '待复核') + '</button>').join('') || '区域尚未定位，仍可使用下方原图进行人工复核';
-  BOM_COLS = [...new Set([...Object.keys(BOM_LABELS), ...bomComponents.flatMap(comp => Object.keys(comp))])]
-    .filter(c => !HIDDEN_COLS.has(c));
+  BOM_COLS = bomColumnKeys(bomComponents, res.bom.model_info?.enterprise_detail_fields);
   renderBomTable();
   const issues = res.issues || [];
   $("#bom-issues-count").textContent = issues.length;
@@ -180,8 +281,10 @@ function renderBomResult(res) {
   coveragePanel.innerHTML = renderInspectionCoverage(res);
   fillTable("#combined-dims", ["尺寸代号", "数值", "视图"], (res.dimensions || []).map(d => [d.tag || "", d.value || "", d.view || ""]));
   $("#ins-preview-load").click();
-  $$('#view-bom [data-dl]').forEach(b =>
-    b.dataset.dl = "/api/export/bom/" + bomJobId + "?fmt=" + new URL(b.dataset.dl, location.origin).searchParams.get("fmt"));
+  $$('#view-bom [data-dl]').forEach(b => {
+    try { b.dataset.dl = bomExportUrl(new URL(b.dataset.dl, location.origin).searchParams.get('fmt')); b.disabled = false; }
+    catch (_) { b.disabled = true; }
+  });
 }
 
 function renderInspectionCoverage(res) {
@@ -241,19 +344,37 @@ const BOM_LABELS = { item_no: "序号", part_number: "图号/件号", name_zh: "
 const EDITABLE = new Set(["part_number", "name_zh", "name_en", "category", "specification",
   "material", "quantity", "weight", "unit", "position", "supplier", "remark"]);
 const NUMERIC_COLS = new Set(["quantity", "weight", "item_no"]);
-const HIDDEN_COLS = new Set(["needs_review", "review_reasons", "confidence"]);
+const HIDDEN_COLS = new Set(["needs_review", "review_reasons", "confidence", "detail_values"]);
+const DETAIL_PREFIX = 'detail.';
+
+function bomColumnKeys(components, configured = []) {
+  const detailKeys = [...configured, ...components.flatMap(comp => Object.keys(comp.detail_values || {}))];
+  return [...new Set([...Object.keys(BOM_LABELS), ...components.flatMap(comp => Object.keys(comp)),
+    ...detailKeys.map(key => DETAIL_PREFIX + key)])].filter(c => !HIDDEN_COLS.has(c));
+}
+
+function bomColumnLabel(key) {
+  return key.startsWith(DETAIL_PREFIX) ? key.slice(DETAIL_PREFIX.length) + '（企业明细）' : BOM_LABELS[key] || key;
+}
+
+function bomColumnValue(component, key) {
+  if (!key.startsWith(DETAIL_PREFIX)) return component[key] ?? '';
+  const detailKey = key.slice(DETAIL_PREFIX.length);
+  const detail = component.detail_values || {};
+  return Object.hasOwn(detail, detailKey) ? detail[detailKey] : '';
+}
 
 function renderBomTable() {
   const t = $("#bom-table");
   const cols = BOM_COLS;
-  let html = "<tr>" + cols.map(c => "<th>" + (BOM_LABELS[c] || c) + "</th>").join("") + "</tr>";
+  let html = "<tr>" + cols.map(c => "<th>" + esc(bomColumnLabel(c)) + "</th>").join("") + "</tr>";
   bomComponents.forEach((comp, i) => {
     const reasons = (comp.review_reasons || []).join("\n");
     const flagged = comp.needs_review && reasons;
     html += "<tr" + (flagged ? ' class="row-review" title="' + esc(reasons) + '"' : "") + ">" + cols.map((c, ci) => {
-      const v = comp[c] === null || comp[c] === undefined ? "" : comp[c];
+      const v = bomColumnValue(comp, c);
       const badge = (flagged && ci === 0) ? '<span class="review-flag" title="' + esc(reasons) + '">⚠</span> ' : "";
-      if (EDITABLE.has(c)) return "<td class=\"editable\">" + badge + '<span contenteditable="true" data-i="' + i + '" data-c="' + c + '">' + esc(v) + '</span></td>';
+      if (bomEditAllowed && (EDITABLE.has(c) || c.startsWith(DETAIL_PREFIX))) return "<td class=\"editable\">" + badge + '<span contenteditable="true" data-i="' + i + '" data-c="' + esc(c) + '">' + esc(v) + '</span></td>';
       return "<td>" + badge + esc(v) + "</td>";
     }).join("") + "</tr>";
   });
@@ -262,6 +383,13 @@ function renderBomTable() {
     const td = e.target;
     if (td.dataset.i === undefined) return;
     const i = +td.dataset.i, c = td.dataset.c;
+    if (c.startsWith(DETAIL_PREFIX)) {
+      const key = c.slice(DETAIL_PREFIX.length), value = td.textContent.trim();
+      const fields = {...bomComponents[i].detail_values, [key]: value};
+      if (!value) delete fields[key];
+      bomComponents[i].detail_values = fields;
+      return;
+    }
     bomComponents[i][c] = NUMERIC_COLS.has(c) ? (td.textContent.trim() === "" ? null : Number(td.textContent)) : td.textContent.trim();
     if (NUMERIC_COLS.has(c) && td.textContent.trim() !== '' && !Number.isFinite(Number(td.textContent))) bomComponents[i][c] = td.textContent.trim();
   };
@@ -753,6 +881,7 @@ function dethRenderSummary(s) {
   if (!s.total) { el.innerHTML = '<span class="hint">暂无历史记录——完成一次图纸识别后自动留痕（含失败任务）。</span>'; return; }
   el.innerHTML = [
     dethChip("检测次数", s.total), dethChip("成功", s.ok), dethChip("失败", s.failed),
+    ...(s.incomplete ? [dethChip('分页未完成', s.incomplete)] : []),
     dethChip("成功率", s.success_rate == null ? "-" : Math.round(s.success_rate * 100) + "%"),
     dethChip("平均识别", s.avg_bom_time_s != null ? s.avg_bom_time_s + "s" : "-"),
     dethChip("平均审图", s.avg_inspection_time_s != null ? s.avg_inspection_time_s + "s" : "-"),
@@ -768,9 +897,9 @@ function dethRenderRows(records) {
   tbody.innerHTML = records.map((r) => {
     const bom = r.bom || {}, asm = r.assembly || {}, insp = r.inspection || {},
           tim = r.timings || {}, model = r.model || {};
-    const ok = r.status === "ok";
-    const status = ok ? '<span class="badge">成功</span>'
-                      : '<span class="badge" style="color:#b00020;border-color:#b00020">失败</span>';
+    const ok = r.status !== 'failed';
+    const status = r.status === 'ok' ? '<span class="badge">成功</span>'
+      : '<span class="badge" style="color:#b00020;border-color:#b00020">' + (ok ? '分页未完成' : '失败') + '</span>';
     const cells = [
       esc(r.finished_at || ""), esc(r.file_name || "-"), esc(model.model || "-"), status,
       ok ? (bom.n_components ?? "-") : "-",
@@ -802,16 +931,15 @@ function dethCountPair(obj) {
   return entries.length ? entries.map(([k, v]) => k + " " + v).join("；") : null;
 }
 
-function dethRenderBomTable(components) {
+function dethRenderBomTable(components, configured) {
   // 与主页面 #bom-table 相同的列（只读快照，保留 ⚠ 待复核标记）。
-  const cols = [...new Set([...Object.keys(BOM_LABELS), ...components.flatMap(c => Object.keys(c))])]
-    .filter(c => !HIDDEN_COLS.has(c));
-  let html = "<tr>" + cols.map(c => "<th>" + (BOM_LABELS[c] || c) + "</th>").join("") + "</tr>";
+  const cols = bomColumnKeys(components, configured);
+  let html = "<tr>" + cols.map(c => "<th>" + esc(bomColumnLabel(c)) + "</th>").join("") + "</tr>";
   components.forEach((comp) => {
     const reasons = (comp.review_reasons || []).join("\n");
     const flagged = comp.needs_review && reasons;
     html += "<tr" + (flagged ? ' class="row-review" title="' + esc(reasons) + '"' : "") + ">" + cols.map((c) => {
-      const v = comp[c] === null || comp[c] === undefined ? "" : comp[c];
+      const v = bomColumnValue(comp, c);
       const badge = flagged ? '<span class="review-flag" title="' + esc(reasons) + '">⚠</span> ' : "";
       return "<td>" + badge + esc(v) + "</td>";
     }).join("") + "</tr>";
@@ -831,15 +959,31 @@ async function showDetectionDetail(jobId) {
   const tree = (res.bom || {}).assembly || {};
   const out = [];
   out.push('<div class="card"><h2>概览</h2><div class="kv-grid">' +
-    dethKV("状态", r.status === "ok" ? "成功" : "失败" + (r.error ? "：" + r.error : "")) +
+    dethKV('状态', r.status === 'incomplete' ? '分页未完成' : r.status === 'ok' ? '成功' : '失败' + (r.error ? '：' + r.error : '')) +
     dethKV("完成时间", r.finished_at) + dethKV("文件", r.file_name) +
     dethKV("文档号", r.document_id) +
     dethKV("SHA256", r.source_sha256 ? String(r.source_sha256).slice(0, 16) + "…" : null) +
     dethKV("页数", model.pages) + "</div></div>");
-  if (r.status !== "ok") {
+  if (r.status === 'failed') {
     $("#deth-detail").innerHTML = out.join("");
     $("#deth-dialog-title").textContent = "检测详情 · " + (r.file_name || r.job_id);
     $("#deth-dialog").showModal();
+    return;
+  }
+  if (res.page_statuses?.length) {
+    out.push('<div class="card"><h2>分页识别状态</h2><div class="table-wrap"><table><tr><th>原始页码</th><th>明细识别状态</th><th>说明</th></tr>' +
+      bomPageStatusRows(res.page_statuses).map(row => '<tr>' + row.map(value => '<td>' + esc(value) + '</td>').join('') + '</tr>').join('') + '</table></div></div>');
+  }
+  if (res.output_mode === 'per_page') {
+    for (const unit of res.page_results || []) {
+      const rows = unit.bom.components || [];
+      out.push('<details class="card"><summary>第 ' + esc(unit.page) + ' 页 · ' + rows.length + ' 行</summary>' +
+        '<div class="kv-grid">' + dethKV('本页图号', unit.title_block?.drawing_no) + dethKV('本页图名', unit.title_block?.drawing_name) + '</div>' +
+        (rows.length ? '<div class="table-wrap"><table>' + dethRenderBomTable(rows, unit.bom.model_info?.enterprise_detail_fields) + '</table></div>' : '') + '</details>');
+    }
+    $('#deth-detail').innerHTML = out.join('');
+    $('#deth-dialog-title').textContent = '检测详情 · ' + (r.file_name || r.job_id);
+    $('#deth-dialog').showModal();
     return;
   }
   out.push('<div class="card"><h2>模型与配置</h2><div class="kv-grid">' +
